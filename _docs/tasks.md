@@ -45,8 +45,70 @@ Initialize the project foundation and dependency management using `uv`, scaffold
 - Do not write any application business logic, models, or bot/API handlers
 
 ## 2. Database Engine and Base Models Setup
-Goal: Configure asynchronous SQLite with WAL mode and define declarative SQLAlchemy models.
-Description: Implement an asynchronous SQLAlchemy 2.0 database engine using `aiosqlite` with connection event listeners enforcing SQLite `PRAGMA journal_mode=WAL`, `busy_timeout=5000`, and `foreign_keys=ON`. Define declarative models for `User` and `Task` with fields for task status, priority, tags, target date, deadlines, recurrence rules, and user timezones. Create a helper utility or database initialization script to create tables asynchronously, accompanied by a test verifying table creation.
+
+### Goal
+
+Configure an asynchronous SQLAlchemy 2.0 database engine with SQLite WAL mode, foreign key enforcement, and busy timeout PRAGMAs, and define declarative base models for `User` and `Task` with asynchronous table initialization utilities and automated tests.
+
+### Acceptance criteria
+
+- [ ] `src/models/base.py` defines `Base` inheriting from SQLAlchemy 2.0 `DeclarativeBase`.
+- [ ] `src/models/user.py` defines the `User` model mapped to table name `users`.
+- [ ] `User.telegram_id` is defined as `BigInteger`, primary key, non-nullable (REQ-USR-01).
+- [ ] `User.timezone` is defined as `String`, non-nullable, defaulting to `"Europe/Kyiv"` (REQ-USR-01).
+- [ ] `User.created_at` is defined as timezone-aware UTC datetime (`DateTime(timezone=True)`), defaulting to the current UTC time (REQ-USR-01).
+- [ ] `User.tasks` defines a one-to-many relationship with `Task` using `back_populates="user"` and cascade delete option `cascade="all, delete-orphan"`.
+- [ ] `src/models/task.py` defines `TaskStatus` enum with values `todo`, `done`, `canceled` and `TaskPriority` enum with values `low`, `medium`, `high`.
+- [ ] `src/models/task.py` defines the `Task` model mapped to table name `tasks` (REQ-TSK-01).
+- [ ] `Task.id` is defined as an integer primary key with autoincrement (REQ-TSK-01).
+- [ ] `Task.user_id` is defined as `BigInteger`, non-nullable, indexed foreign key referencing `users.telegram_id` with `ondelete="CASCADE"` (REQ-TSK-01).
+- [ ] `Task.title` is defined as `String(255)`, non-nullable (REQ-TSK-01).
+- [ ] `Task.status` is defined with type `TaskStatus`, non-nullable, defaulting to `TaskStatus.todo` (`"todo"`) (REQ-TSK-01).
+- [ ] `Task.priority` is defined with type `TaskPriority`, non-nullable, defaulting to `TaskPriority.medium` (`"medium"`) (REQ-TSK-01).
+- [ ] `Task.tag` is defined as an optional `String(50)`, nullable=True (REQ-TSK-01).
+- [ ] `Task.target_date` is defined as `Date` (YYYY-MM-DD), non-nullable, indexed (REQ-TSK-01).
+- [ ] `Task.deadline_at` is defined as an optional timezone-aware UTC datetime (`DateTime(timezone=True)`), nullable=True (REQ-TSK-01).
+- [ ] `Task.recurrence` is defined as an optional `String`, nullable=True (supporting format strings like `daily` or `weekdays:[0,1,2,3,4,5,6]`) (REQ-TSK-01).
+- [ ] `Task.reminder_sent_1h` is defined as `Boolean`, non-nullable, defaulting to `False` (REQ-TSK-01).
+- [ ] `Task.reminder_sent_10m` is defined as `Boolean`, non-nullable, defaulting to `False` (REQ-TSK-01).
+- [ ] `Task.created_at` is defined as timezone-aware UTC datetime (`DateTime(timezone=True)`), defaulting to the current UTC time (REQ-TSK-01).
+- [ ] `Task.user` defines a relationship to `User` using `back_populates="tasks"`.
+- [ ] `src/models/__init__.py` imports and exposes `Base`, `User`, `Task`, `TaskStatus`, and `TaskPriority`.
+- [ ] `src/core/database.py` defines an asynchronous SQLAlchemy engine using `create_async_engine` configured for SQLite via `aiosqlite` with default URL `sqlite+aiosqlite:///tasks.db` or configured via environment settings (REQ-NFR-01).
+- [ ] `src/core/database.py` registers a connection event listener on the engine that executes `PRAGMA foreign_keys=ON`, `PRAGMA busy_timeout=5000`, and `PRAGMA journal_mode=WAL` (REQ-NFR-01).
+- [ ] `src/core/database.py` defines `async_sessionmaker` configured with `expire_on_commit=False` and `class_=AsyncSession`.
+- [ ] `src/core/database.py` defines an async context manager or generator `get_session()` providing an `AsyncSession` for transactions.
+- [ ] `src/core/database.py` defines an async function `init_db(engine=...)` that creates all tables in metadata (`Base.metadata.create_all`).
+- [ ] `tests/conftest.py` provides an async fixture `db_session` providing an isolated in-memory SQLite async session with all tables created.
+- [ ] `tests/unit/test_database.py` contains automated tests verifying `PRAGMA foreign_keys` is enabled (`1`) and `PRAGMA busy_timeout` is set to `5000` on connections.
+- [ ] `tests/unit/test_database.py` contains automated tests verifying `User` creation with default timezone `"Europe/Kyiv"` and timestamp.
+- [ ] Automated tests verify `Task` creation with default status `todo`, priority `medium`, and reminder flags set to `False`.
+- [ ] Automated tests verify foreign key constraint enforcement: inserting a `Task` with an unpersisted `user_id` raises an `IntegrityError`.
+- [ ] Automated tests verify cascade delete: deleting a `User` record automatically cascades and removes all associated `Task` records.
+- [ ] All tests run with `uv run pytest` and pass with 0 errors and 0 failures.
+
+### Out of scope
+
+- User registration command handling, user profile retrieval, and timezone update service logic, moved to #3
+- Task CRUD service functions, rollover logic, and date filtering queries, moved to #5
+- Gemini AI client, audio ingestion, and structured parser service, moved to #4
+- Telegram bot dispatcher setup and `/start` onboarding command handler, moved to #6
+- Voice and text bot ingestion handlers with inline confirmation keyboards, moved to #7
+- Midnight rollover interactive dialogue, moved to #8
+- FastAPI backend initialization and Telegram WebApp initData authentication, moved to #9
+- Mini App REST API endpoints for tasks, moved to #10
+- Frontend React + Vite + Tailwind Mini App scaffold, moved to #11
+- APScheduler timezone-aware background jobs, moved to #13
+- Deadline notification background reminders, moved to #14
+
+### Constraints
+
+- Files this should stay inside: `src/core/database.py`, `src/core/__init__.py`, `src/models/base.py`, `src/models/user.py`, `src/models/task.py`, `src/models/__init__.py`, `tests/conftest.py`, `tests/unit/test_database.py`
+- Libraries to use: `sqlalchemy>=2.0` (Mapped, mapped_column, DeclarativeBase, async_sessionmaker, create_async_engine), `aiosqlite`, `pytest`, `pytest-asyncio`
+- Do not add new dependencies without explicit permission per `Agents.md`
+- Follow testing conventions in `_docs/testing-guidelines.md` (isolated in-memory SQLite `sqlite+aiosqlite:///:memory:`, `@pytest.mark.asyncio`, REQ docstrings)
+- Follow modular architecture defined in `_docs/schema.md`
+- Do not implement business logic services, bot handlers, or API routes in this task
 
 ## 3. User Service and Timezone Management
 Goal: Implement business logic to create, retrieve, and update user preferences and timezones.
