@@ -1,8 +1,48 @@
 # Project Backlog: Telegram Task Tracker Bot & Mini App
 
 ## 1. Project Setup and Test Harness
-Goal: Set up the project foundation, dependency management, and a passing automated test.
-Description: Initialize the project structure using `uv` with dependencies specified in `pyproject.toml` (including `aiogram`, `fastapi`, `sqlalchemy`, `aiosqlite`, `pytest`, `pytest-asyncio`, and `pydantic`). Create a minimal smoke test using `pytest` that runs via `uv run pytest` and passes. Ensure the directory structure is prepared for modular application components per `_docs/schema.md` without adding business logic yet. Refer to acceptance criteria in `_docs/requirements.md` (REQ-NFR-01).
+
+### Goal
+
+Initialize the project foundation and dependency management using `uv`, scaffold the modular directory structure defined in `_docs/schema.md`, and establish an automated test harness with a passing pytest smoke test.
+
+### Acceptance criteria
+
+- [ ] `pyproject.toml` exists in the repository root with project metadata, `requires-python = ">=3.11"`, and pytest configuration.
+- [ ] Core dependencies specified in `pyproject.toml` include `aiogram>=3.0`, `fastapi`, `uvicorn`, `sqlalchemy>=2.0`, `aiosqlite`, `pydantic>=2.0`, `pydantic-settings`, `apscheduler`, and `google-genai`.
+- [ ] Development/test dependencies specified in `pyproject.toml` include `pytest` and `pytest-asyncio`.
+- [ ] Running `uv sync` resolves all dependencies without conflict, exits with returncode 0, and generates `uv.lock`.
+- [ ] Pytest configuration under `[tool.pytest.ini_options]` in `pyproject.toml` configures `testpaths = ["tests"]`, `pythonpath = [".", "src"]`, and `asyncio_mode = "auto"`.
+- [ ] Project directory structure matching `_docs/schema.md` is created under `src/` with packages initialized via `__init__.py` files: `src/core/`, `src/models/`, `src/schemas/`, `src/services/`, `src/bot/handlers/`, `src/bot/keyboards/`, `src/bot/middlewares/`, `src/scheduler/`, and `src/api/routes/`.
+- [ ] Test directory structure matching `_docs/testing-guidelines.md` is present: `tests/` contains `conftest.py`, `test_smoke.py`, and empty subdirectories `tests/unit/` and `tests/integration/` tracked via `.gitkeep` or `__init__.py`.
+- [ ] `tests/test_smoke.py` contains a test function that imports core packages (`aiogram`, `fastapi`, `sqlalchemy`, `aiosqlite`, `pydantic`, `apscheduler`, `google.genai`) and asserts they are successfully loaded.
+- [ ] `tests/test_smoke.py` contains an asynchronous test marked with `@pytest.mark.asyncio` verifying that async execution under pytest-asyncio passes.
+- [ ] Running `uv run pytest` discovers and executes all tests in `tests/test_smoke.py`, completing with 0 errors, 0 failures, and exit code 0.
+- [ ] Running `uv run pytest tests/test_smoke.py` executes only the smoke test file and passes with exit code 0.
+- [ ] No database schema, business logic, bot handlers, or API route logic is implemented in this task.
+
+### Out of scope
+
+- Database engine configuration, WAL mode PRAGMA listeners, and declarative SQLAlchemy models, moved to #2
+- User service layer and timezone management logic, moved to #3
+- Gemini AI client wrapper, audio byte ingestion, and structured parser, moved to #4
+- Task management CRUD service and midnight rollover logic, moved to #5
+- Telegram bot dispatcher setup and `/start` command handler, moved to #6
+- Voice and text bot ingestion handlers with inline confirmation keyboards, moved to #7
+- Midnight rollover interactive dialogue, moved to #8
+- FastAPI backend initialization and Telegram WebApp initData authentication, moved to #9
+- Mini App REST API endpoints for tasks, moved to #10
+- Frontend React + Vite + Tailwind Mini App scaffold, moved to #11
+- APScheduler timezone-aware background jobs, moved to #13
+
+### Constraints
+
+- Files this should stay inside: `pyproject.toml`, `uv.lock`, `src/**/__init__.py`, `tests/conftest.py`, `tests/test_smoke.py`, `tests/unit/.gitkeep`, `tests/integration/.gitkeep`
+- Libraries and tools to use: `uv` for package management, `pytest` and `pytest-asyncio` for test runner
+- Dependencies must strictly be defined in `pyproject.toml` per `Agents.md`
+- Follow testing conventions in `_docs/testing-guidelines.md`
+- Follow modular architecture defined in `_docs/schema.md`
+- Do not write any application business logic, models, or bot/API handlers
 
 ## 2. Database Engine and Base Models Setup
 Goal: Configure asynchronous SQLite with WAL mode and define declarative SQLAlchemy models.
