@@ -1,6 +1,13 @@
 Tasks_bot/
 ├── _docs/
-│   └── plan.md.md
+│   ├── plan.md
+│   ├── process.md               # Правила організації роботи та GitHub Issues
+│   ├── requirements.md          # Специфікація вимог (SRS) та Acceptance Criteria
+│   ├── tasks.md                 # Беклог завдань
+│   ├── testing-guidelines.md    # Інструкції та правила тестування
+│   ├── design-system.md         # Дизайн-система та правила Telegram Mini App
+│   └── schema.md                # Архітектурна структура проєкту
+│
 ├── src/
 │   ├── core/                    # Загальна конфігурація та ініціалізація
 │   │   ├── config.py            # Pydantic Settings (.env, токени)
@@ -37,7 +44,14 @@ Tasks_bot/
 │       ├── auth.py              # Валідація Telegram initData
 │       └── routes/              # Ендпоінти для списку задач, календаря, дашборду
 │
+├── tests/                       # Автоматизовані тести (pytest)
+│   ├── conftest.py              # Fixtures (in-memory SQLite, async client, mocks)
+│   └── test_smoke.py
+│
 ├── frontend/                    # Telegram Mini App (React + Vite + Tailwind, Етап 2)
 ├── .env.example
-├── requirements.txt
+├── .gitignore
+├── pyproject.toml               # Залежності проєкту (uv)
+├── uv.lock
+├── Agents.md                    # Інструкції та команди для агентів
 └── main.py                      # Точка входу для запуску

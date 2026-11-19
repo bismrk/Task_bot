@@ -17,27 +17,22 @@
 ## 2. Стек технологій
 * **Bot:** `aiogram 3.x`
 * **API (Етап 2+):** `FastAPI` (авторизація через Telegram `initData`)
-* **БД:** `SQLAlchemy 2.0` (async) + `PostgreSQL` (для локального старту в `bot.py` використовується `SQLite`)
-* **Планувальник (Етап 3):** `APScheduler`
+* **БД:** `SQLAlchemy 2.0` (async) + `SQLite` (режим WAL, драйвер `aiosqlite`, легка міграція на `PostgreSQL`)
+* **Планувальник (Етап 3):** `APScheduler` (з підтримкою часових поясів користувачів)
 * **AI:** `google-genai` (`gemini-2.5-flash`, Structured Outputs)
-* **Frontend (Етап 2+):** `React` + `Vite` + `Tailwind CSS` + `Recharts`
+* **Frontend (Етап 2+):** `React` + `Vite` + `Tailwind CSS` + `Recharts` + `shadcn/ui`
+* **Керування проєктом & залежності:** `uv` (`pyproject.toml`)
 
 ---
 
 ## 3. Швидкий запуск Етапу 1 (`bot.py`)
 
-1. Створи віртуальне середовище та встанови залежності:
+1. Встанови залежності через `uv`:
 ```bash
-python -m venv venv
-# Windows:
-venv\Scripts\activate
-# Linux/macOS:
-source venv/bin/activate
-
-pip install aiogram google-genai sqlalchemy aiosqlite pydantic python-dotenv
+uv sync
 ```
 
-2. Створи файл `.env` поруч із `bot.py`:
+2. Створи файл `.env` поруч із `bot.py` (за шаблоном `.env.example`):
 ```env
 BOT_TOKEN=твій_токен_від_BotFather
 GEMINI_API_KEY=твій_ключ_від_Google_AI_Studio
@@ -46,7 +41,7 @@ DATABASE_URL=sqlite+aiosqlite:///tasks.db
 
 3. Запусти бота:
 ```bash
-python bot.py
+uv run python bot.py
 ```
 
 ---

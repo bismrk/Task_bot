@@ -2,7 +2,7 @@
 
 ## 1. Project Setup and Test Harness
 Goal: Set up the project foundation, dependency management, and a passing automated test.
-Description: Initialize the project structure with a virtual environment, configuration management, and a `requirements.txt` file including `aiogram`, `fastapi`, `sqlalchemy`, `aiosqlite`, `pytest`, `pytest-asyncio`, and `pydantic`. Create a minimal smoke test using `pytest` that validates the test environment runs and passes. Ensure the directory structure is prepared for modular application components without adding business logic yet.
+Description: Initialize the project structure using `uv` with dependencies specified in `pyproject.toml` (including `aiogram`, `fastapi`, `sqlalchemy`, `aiosqlite`, `pytest`, `pytest-asyncio`, and `pydantic`). Create a minimal smoke test using `pytest` that runs via `uv run pytest` and passes. Ensure the directory structure is prepared for modular application components per `_docs/schema.md` without adding business logic yet. Refer to acceptance criteria in `_docs/requirements.md` (REQ-NFR-01).
 
 ## 2. Database Engine and Base Models Setup
 Goal: Configure asynchronous SQLite with WAL mode and define declarative SQLAlchemy models.
