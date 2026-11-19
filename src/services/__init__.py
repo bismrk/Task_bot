@@ -5,6 +5,18 @@ from src.services.ai_parser import (
     parse_tasks_from_audio,
     parse_tasks_from_text,
 )
+from src.services.task_service import (
+    batch_rollover_tasks,
+    create_task,
+    create_tasks_batch,
+    delete_task,
+    get_overdue_tasks,
+    get_task,
+    get_tasks_for_date,
+    rollover_task,
+    toggle_task_status,
+    update_task,
+)
 from src.services.user_service import (
     get_or_create_user,
     get_user,
@@ -22,4 +34,14 @@ __all__ = [
     "parse_tasks",
     "parse_tasks_from_text",
     "parse_tasks_from_audio",
+    "create_task",
+    "create_tasks_batch",
+    "get_task",
+    "get_tasks_for_date",
+    "update_task",
+    "toggle_task_status",
+    "delete_task",
+    "get_overdue_tasks",
+    "rollover_task",
+    "batch_rollover_tasks",
 ]

@@ -242,8 +242,86 @@ Build the Gemini AI client initialization, Pydantic schemas, and parser service 
 - Do not implement database persistence, bot handlers, or API endpoints in this task
 
 ## 5. Task Management CRUD Service
-Goal: Provide core business logic to create, read, update, complete, and rollover tasks.
-Description: Implement an async task service with functions to create tasks, retrieve tasks filtered by user and target date, update task statuses (`todo`, `done`, `canceled`), and manage recurrence tags. Include a dedicated method to query uncompleted tasks from previous days ("хвости") and batch-update them to rollover to a new date or mark them closed. Write unit tests verifying task state transitions, recurrence handling, and date filtering.
+
+### Goal
+
+Implement the task management CRUD service and Pydantic schemas providing asynchronous functions to create, read, update, complete, delete, query by date, and rollover tasks ("хвости") with strict tenant isolation, priority-aware ordering, and comprehensive unit test coverage.
+
+### Acceptance criteria
+
+- [ ] `src/schemas/task.py` defines `TaskCreate` schema inheriting from `BaseModel` with fields: `title: str` (max_length=255, non-empty, stripped), `target_date: date`, `deadline_at: datetime | None = None` (timezone-aware if present), `priority: TaskPriority = TaskPriority.medium`, `tag: str | None = None` (max_length=50, stripped of `#`), and `recurrence: str | None = None` (REQ-TSK-01).
+- [ ] `src/schemas/task.py` defines `TaskUpdate` schema inheriting from `BaseModel` with optional fields for partial update: `title: str | None = None`, `target_date: date | None = None`, `deadline_at: datetime | None = None`, `priority: TaskPriority | None = None`, `tag: str | None = None`, `status: TaskStatus | None = None`, and `recurrence: str | None = None`.
+- [ ] `src/schemas/task.py` defines `TaskRead` schema inheriting from `BaseModel` with fields: `id: int`, `user_id: int`, `title: str`, `status: TaskStatus`, `priority: TaskPriority`, `tag: str | None`, `target_date: date`, `deadline_at: datetime | None`, `recurrence: str | None`, `reminder_sent_1h: bool`, `reminder_sent_10m: bool`, and `created_at: datetime`, configured with `model_config = ConfigDict(from_attributes=True)`.
+- [ ] Existing schemas `ExtractedTask` and `TaskExtractionResult` are preserved in `src/schemas/task.py`.
+- [ ] `src/schemas/__init__.py` imports and exposes `TaskCreate`, `TaskUpdate`, `TaskRead`, `ExtractedTask`, and `TaskExtractionResult`.
+- [ ] `src/services/task_service.py` defines async `create_task(session: AsyncSession, user_id: int, data: TaskCreate | ExtractedTask) -> Task` that persists a new task with `user_id=user_id`, `status=TaskStatus.todo`, `reminder_sent_1h=False`, `reminder_sent_10m=False`, and commits/flushes the record (REQ-TSK-01).
+- [ ] Calling `create_task` with an `ExtractedTask` instance maps `title`, `target_date`, `deadline_at`, `priority`, `tag`, sets `recurrence=None`, and successfully creates the task.
+- [ ] `src/services/task_service.py` defines async `create_tasks_batch(session: AsyncSession, user_id: int, tasks: list[TaskCreate | ExtractedTask]) -> list[Task]` that creates and persists multiple tasks in a single database transaction.
+- [ ] Calling `create_tasks_batch` with an empty list `[]` returns an empty list `[]` immediately without executing database insert queries.
+- [ ] `src/services/task_service.py` defines async `get_task(session: AsyncSession, task_id: int, user_id: int) -> Task | None` returning the `Task` database record if found and owned by `user_id`.
+- [ ] Calling `get_task` with a `task_id` belonging to a different user returns `None`, enforcing tenant isolation (REQ-NFR-02).
+- [ ] Calling `get_task` with a non-existent `task_id` returns `None`.
+- [ ] `src/services/task_service.py` defines async `get_tasks_for_date(session: AsyncSession, user_id: int, target_date: date) -> list[Task]` retrieving tasks matching `user_id == user_id` and `target_date == target_date` (REQ-API-02).
+- [ ] `get_tasks_for_date` orders results with `TaskStatus.todo` first sorted by priority (`TaskPriority.high` -> `TaskPriority.medium` -> `TaskPriority.low`), followed by `TaskStatus.done` tasks, then by creation time / ID.
+- [ ] Calling `get_tasks_for_date` for a date with no matching tasks returns an empty list `[]`.
+- [ ] `src/services/task_service.py` defines async `update_task(session: AsyncSession, task_id: int, user_id: int, data: TaskUpdate) -> Task` that updates only the fields provided in `data`, commits the transaction, and returns the updated `Task`.
+- [ ] Calling `update_task` with a new `deadline_at` resets reminder flags `reminder_sent_1h = False` and `reminder_sent_10m = False`.
+- [ ] Calling `update_task` for a `task_id` belonging to another user raises `ValueError("Task not found or access denied")` and leaves the database record unmodified (REQ-NFR-02).
+- [ ] Calling `update_task` for a non-existent `task_id` raises `ValueError("Task not found or access denied")`.
+- [ ] `src/services/task_service.py` defines async `toggle_task_status(session: AsyncSession, task_id: int, user_id: int, new_status: TaskStatus) -> Task` that updates `task.status = new_status`, commits, and returns the updated `Task` (REQ-TSK-02).
+- [ ] Calling `toggle_task_status` for a `task_id` belonging to another user raises `ValueError("Task not found or access denied")` and does not change the task status (REQ-TSK-02, REQ-NFR-02).
+- [ ] Calling `toggle_task_status` for a non-existent `task_id` raises `ValueError("Task not found or access denied")`.
+- [ ] `src/services/task_service.py` defines async `delete_task(session: AsyncSession, task_id: int, user_id: int) -> bool` that deletes the task and returns `True` if found and owned by `user_id`.
+- [ ] Calling `delete_task` for a `task_id` belonging to another user returns `False`, does not delete the task, and leaves the database unmodified (REQ-NFR-02).
+- [ ] Calling `delete_task` for a non-existent `task_id` returns `False`.
+- [ ] `src/services/task_service.py` defines async `get_overdue_tasks(session: AsyncSession, user_id: int, before_date: date) -> list[Task]` that retrieves all uncompleted tasks (`status == TaskStatus.todo`) where `target_date < before_date` belonging to `user_id`, ordered by `target_date ASC` then priority `high -> medium -> low` (REQ-SCH-01).
+- [ ] `get_overdue_tasks` ignores tasks with status `TaskStatus.done` or `TaskStatus.canceled`, and ignores tasks on or after `before_date`.
+- [ ] `get_overdue_tasks` strictly filters by `user_id` and does not return overdue tasks belonging to other users (REQ-NFR-02).
+- [ ] Calling `get_overdue_tasks` when no overdue tasks exist returns an empty list `[]`.
+- [ ] `src/services/task_service.py` defines async `rollover_task(session: AsyncSession, task_id: int, user_id: int, new_date: date) -> Task` that updates `task.target_date = new_date`, commits, and returns the updated `Task` (REQ-SCH-01).
+- [ ] Calling `rollover_task` for a `task_id` belonging to another user raises `ValueError("Task not found or access denied")` and does not change `target_date` (REQ-NFR-02).
+- [ ] Calling `rollover_task` for a non-existent `task_id` raises `ValueError("Task not found or access denied")`.
+- [ ] `src/services/task_service.py` defines async `batch_rollover_tasks(session: AsyncSession, task_ids: list[int], user_id: int, new_date: date) -> list[Task]` that updates `target_date = new_date` for all tasks in `task_ids` owned by `user_id`, commits, and returns the list of updated `Task` instances (REQ-SCH-01).
+- [ ] Calling `batch_rollover_tasks` with an empty `task_ids` list returns `[]` immediately without executing database updates.
+- [ ] `batch_rollover_tasks` ignores any `task_id` in `task_ids` that belongs to another user without mutating other users' data (REQ-NFR-02).
+- [ ] `src/services/__init__.py` imports and exposes `create_task`, `create_tasks_batch`, `get_task`, `get_tasks_for_date`, `update_task`, `toggle_task_status`, `delete_task`, `get_overdue_tasks`, `rollover_task`, and `batch_rollover_tasks`.
+- [ ] `tests/unit/test_task_service.py` contains automated unit tests using the in-memory SQLite fixture `db_session` verifying `create_task` with `TaskCreate` persists all fields, default status `todo`, priority, and reminder flags (REQ-TSK-01).
+- [ ] Automated tests verify `create_task` with `ExtractedTask` correctly populates `Task` attributes and sets `recurrence=None`.
+- [ ] Automated tests verify `create_tasks_batch` creates multiple tasks and handles empty list `[]`.
+- [ ] Automated tests verify `get_task` returns `Task` for owner and `None` for non-existent or other user's task (REQ-NFR-02).
+- [ ] Automated tests verify `get_tasks_for_date` returns tasks for target date sorted by status (`todo` before `done`) and priority (`high` -> `medium` -> `low`), and returns `[]` when no tasks match.
+- [ ] Automated tests verify `update_task` updates fields, resets reminder flags when `deadline_at` is updated, and raises `ValueError` for non-existent or foreign user tasks (REQ-NFR-02).
+- [ ] Automated tests verify `toggle_task_status` transitions between `todo`, `done`, and `canceled`, and raises `ValueError` when mutating another user's task (REQ-TSK-02, REQ-NFR-02).
+- [ ] Automated tests verify `delete_task` deletes owner's task returning `True`, and returns `False` for non-existent or foreign user tasks without deleting records (REQ-NFR-02).
+- [ ] Automated tests verify `get_overdue_tasks` returns only uncompleted tasks (`status == todo`) with `target_date < before_date` strictly for the given user (REQ-SCH-01, REQ-NFR-02).
+- [ ] Automated tests verify `rollover_task` updates `target_date` to new date and enforces tenant ownership (REQ-SCH-01, REQ-NFR-02).
+- [ ] Automated tests verify `batch_rollover_tasks` updates multiple tasks for owner and does not mutate tasks belonging to another user (REQ-SCH-01, REQ-NFR-02).
+- [ ] Automated tests verify Pydantic schemas `TaskCreate`, `TaskUpdate`, and `TaskRead` validation, defaults, field limits, and `from_attributes=True` serialization.
+- [ ] All test functions in `tests/unit/test_task_service.py` contain docstrings referencing requirement IDs (`REQ-TSK-01`, `REQ-TSK-02`, `REQ-SCH-01`, `REQ-NFR-02`).
+- [ ] Running `uv run pytest tests/unit/test_task_service.py` executes all task service tests and passes with 0 errors and 0 failures.
+- [ ] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- Telegram bot dispatcher setup and `/start` onboarding command handler, moved to #6
+- Voice and text message bot handlers and inline confirmation keyboards (`[✅ Зберегти]`), moved to #7
+- Midnight rollover interactive dialogue flow (00:00 "Хвости" bot UI), moved to #8
+- FastAPI backend initialization and Telegram WebApp initData authentication, moved to #9
+- Mini App REST API endpoints for tasks (`/api/tasks`), moved to #10
+- Frontend React Mini App checklist and task creation UI, moved to #11, #12
+- Recurring task automatic generation logic across days (REQ-TMA-02), moved to #12
+- APScheduler timezone-aware background jobs (00:00 rollover & 09:00 push), moved to #13
+- Scheduled deadline proximity push notifications (-1h and -10m), moved to #14
+
+### Constraints
+
+- Files this should stay inside: `src/schemas/task.py`, `src/schemas/__init__.py`, `src/services/task_service.py`, `src/services/__init__.py`, `tests/unit/test_task_service.py`
+- Libraries to use: `sqlalchemy>=2.0` (`select`, `update`, `delete`, `case`, `AsyncSession`), `pydantic>=2.0` (`BaseModel`, `Field`, `ConfigDict`, `field_validator`), `datetime` (Python standard library), `pytest`, `pytest-asyncio`
+- Do not add new dependencies to `pyproject.toml` without explicit permission per `Agents.md`
+- Follow testing conventions in `_docs/testing-guidelines.md` (isolated in-memory SQLite fixture `db_session`, `@pytest.mark.asyncio`, REQ docstrings)
+- All database queries must strictly enforce tenant isolation by filtering `Task.user_id == user_id` per REQ-NFR-02
+- Follow modular architecture defined in `_docs/schema.md`
+- Do not implement bot handlers, API endpoints, or background scheduler jobs in this task
 
 ## 6. Telegram Bot Dispatcher and /start Command
 Goal: Initialize the aiogram 3 bot dispatcher and implement the user onboarding flow.
