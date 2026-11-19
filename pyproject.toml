@@ -8,6 +8,7 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "sqlalchemy>=2.0",
+    "greenlet",
     "aiosqlite",
     "pydantic>=2.0",
     "pydantic-settings",
