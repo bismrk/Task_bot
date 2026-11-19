@@ -324,8 +324,82 @@ Implement the task management CRUD service and Pydantic schemas providing asynch
 - Do not implement bot handlers, API endpoints, or background scheduler jobs in this task
 
 ## 6. Telegram Bot Dispatcher and /start Command
-Goal: Initialize the aiogram 3 bot dispatcher and implement the user onboarding flow.
-Description: Scaffold the `aiogram 3.x` bot application with dependency injection for database sessions and configuration settings. Implement the `/start` command handler to register new users into the database, assign a default timezone, and reply with an introductory welcome message outlining bot capabilities. Write tests or verification scripts to ensure the dispatcher boots and processes the command cleanly.
+
+### Goal
+
+Configure the application settings using `pydantic-settings`, initialize the `aiogram 3` bot and dispatcher with database session dependency injection middleware, and implement the `/start` command onboarding flow that registers new users with default timezone `Europe/Kyiv`, greets returning users, and displays the launch inline keyboard with 100% mocked automated tests.
+
+### Acceptance criteria
+
+- [ ] `src/core/config.py` defines `Settings` class inheriting from `pydantic_settings.BaseSettings`.
+- [ ] `Settings.BOT_TOKEN` is defined as `str` defaulting to `""`.
+- [ ] `Settings.GEMINI_API_KEY` is defined as `str` defaulting to `""`.
+- [ ] `Settings.DATABASE_URL` is defined as `str` defaulting to `"sqlite+aiosqlite:///tasks.db"`.
+- [ ] `Settings.WEBAPP_URL` is defined as optional `str | None` defaulting to `None`.
+- [ ] `Settings.HOST` is defined as `str` defaulting to `"0.0.0.0"`.
+- [ ] `Settings.PORT` is defined as `int` defaulting to `8000`.
+- [ ] `Settings.DEBUG` is defined as `bool` defaulting to `True`.
+- [ ] `Settings` configures `model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")`.
+- [ ] `src/core/config.py` defines `get_settings() -> Settings` providing a cached or default `Settings` instance.
+- [ ] `src/core/__init__.py` imports and exposes `Settings` and `get_settings`.
+- [ ] `src/bot/middlewares/db.py` defines `DbSessionMiddleware` inheriting from `aiogram.BaseMiddleware`.
+- [ ] `DbSessionMiddleware.__init__(self, sessionmaker: async_sessionmaker[AsyncSession] | None = None)` stores the sessionmaker, defaulting to `src.core.database.async_session_maker` if not provided.
+- [ ] `DbSessionMiddleware` implements `__call__(self, handler, event, data)` which opens an asynchronous session context using `self.sessionmaker()`, injects `session` into `data["session"]`, awaits the handler, commits the session on success, rolls back on exception, and ensures the session is closed upon exit.
+- [ ] If an exception occurs within the handler, `DbSessionMiddleware` rolls back the session and re-raises the exception.
+- [ ] `src/bot/middlewares/__init__.py` imports and exposes `DbSessionMiddleware`.
+- [ ] `src/bot/keyboards/start.py` defines `get_start_keyboard(webapp_url: str | None = None) -> InlineKeyboardMarkup`.
+- [ ] When `webapp_url` is provided as a non-empty string, `get_start_keyboard` returns an `InlineKeyboardMarkup` containing an `InlineKeyboardButton` with text `"🚀 Відкрити план"` and `web_app=WebAppInfo(url=webapp_url)` per `_docs/design-system.md`.
+- [ ] When `webapp_url` is `None` or empty, `get_start_keyboard` returns an `InlineKeyboardMarkup` containing an `InlineKeyboardButton` with text `"🚀 Відкрити план"` and `callback_data="open_plan"`.
+- [ ] The keyboard layout complies with `_docs/design-system.md` (maximum 2 buttons per row).
+- [ ] `src/bot/keyboards/__init__.py` imports and exposes `get_start_keyboard`.
+- [ ] `src/bot/handlers/start.py` defines `router = Router(name="start")`.
+- [ ] `src/bot/handlers/start.py` defines async handler `start_command(message: Message, session: AsyncSession, webapp_url: str | None = None) -> Message | None` decorated with `@router.message(CommandStart())`.
+- [ ] If `message.from_user` is `None`, `start_command` returns immediately without executing database operations or raising an error.
+- [ ] `start_command` calls `get_or_create_user(session, telegram_id=message.from_user.id, timezone="Europe/Kyiv")` (REQ-USR-01).
+- [ ] When `created is True` (new user), `start_command` replies to the user with a welcoming onboarding message outlining bot features (voice tasks, reminders, 00:00 rollover, 09:00 digest) and attaches `get_start_keyboard(webapp_url)` (REQ-USR-01).
+- [ ] When `created is False` (existing user), `start_command` replies to the user with a returning welcome message (e.g. "З поверненням!") and attaches `get_start_keyboard(webapp_url)` without duplicating user records or modifying the user's existing timezone (REQ-USR-01).
+- [ ] All message texts use semantic emojis (`🚀`, `📋`, `✨`, `💡`, `🕒`) and clean HTML formatting per `_docs/design-system.md`.
+- [ ] `src/bot/handlers/__init__.py` imports and exposes `start_router`.
+- [ ] `src/bot/dispatcher.py` defines `create_bot(token: str | None = None, default_parse_mode: ParseMode = ParseMode.HTML) -> Bot` initializing `Bot` with the provided token, falling back to `get_settings().BOT_TOKEN`, or raising `ValueError("BOT_TOKEN is not set")` if no token is provided.
+- [ ] `src/bot/dispatcher.py` defines `create_dispatcher(sessionmaker: async_sessionmaker[AsyncSession] | None = None, webapp_url: str | None = None) -> Dispatcher`.
+- [ ] `create_dispatcher` registers `DbSessionMiddleware(sessionmaker)` on `dp.message.middleware` (and `dp.callback_query.middleware`).
+- [ ] `create_dispatcher` passes `webapp_url` into workflow data (`dp.workflow_data` or handler kwargs) so handlers have access to `webapp_url`.
+- [ ] `create_dispatcher` includes `start_router`.
+- [ ] `src/bot/__init__.py` imports and exposes `create_bot` and `create_dispatcher`.
+- [ ] `tests/unit/test_config.py` contains automated tests verifying `Settings` default values and `.env` override loading.
+- [ ] `tests/unit/test_bot_dispatcher.py` contains automated tests verifying `create_bot` initializes `Bot` with provided token or settings.
+- [ ] `tests/unit/test_bot_dispatcher.py` contains automated tests verifying `create_dispatcher` attaches `DbSessionMiddleware` and includes `start_router`.
+- [ ] `tests/unit/test_bot_dispatcher.py` contains automated tests verifying `get_start_keyboard` generates `WebAppInfo` button when `webapp_url` is provided and fallback `callback_data` button when `webapp_url` is omitted.
+- [ ] `tests/integration/test_bot_handlers.py` contains automated tests verifying `DbSessionMiddleware` injects an active `AsyncSession`, commits after successful handler execution, and rolls back on exception.
+- [ ] `tests/integration/test_bot_handlers.py` contains automated tests using the in-memory SQLite fixture `db_session` verifying new user registration on `/start`: user record is persisted in `users` with `telegram_id` and default timezone `"Europe/Kyiv"`, and onboarding message is sent (REQ-USR-01).
+- [ ] `tests/integration/test_bot_handlers.py` contains automated tests verifying existing user on `/start`: no duplicate user created, existing timezone preserved, and returning user message sent (REQ-USR-01).
+- [ ] `tests/integration/test_bot_handlers.py` contains automated tests verifying `/start` with message where `from_user is None` is handled safely without database modification or crash.
+- [ ] All tests mock Telegram Bot API calls (`message.answer`, `bot.send_message`, etc.) using `unittest.mock.AsyncMock` with zero real network requests per `_docs/testing-guidelines.md`.
+- [ ] All test functions contain docstrings referencing requirement ID `REQ-USR-01`.
+- [ ] Running `uv run pytest` executes all tests and passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- Voice note audio download and text message AI parsing handlers, moved to #7
+- Inline confirmation keyboards (`[✅ Зберегти]`, `[✏️ Виправити]`) and task batch saving callback handlers, moved to #7
+- Midnight rollover interactive dialogue flow (00:00 "Хвости" bot UI), moved to #8
+- FastAPI backend initialization, WebApp initData HMAC-SHA256 authentication, and health check endpoints, moved to #9
+- Mini App REST API endpoints for tasks (`/api/tasks`), moved to #10
+- Frontend React Mini App checklist and task creation UI, moved to #11, #12
+- Recurring task automatic generation logic across days (REQ-TMA-02), moved to #12
+- APScheduler timezone-aware background jobs (00:00 rollover & 09:00 push), moved to #13
+- Scheduled deadline proximity push notifications (-1h and -10m), moved to #14
+- User `/settings` command handler and timezone configuration UI, moved to #17
+
+### Constraints
+
+- Files this should stay inside: `src/core/config.py`, `src/core/__init__.py`, `src/bot/dispatcher.py`, `src/bot/__init__.py`, `src/bot/middlewares/db.py`, `src/bot/middlewares/__init__.py`, `src/bot/keyboards/start.py`, `src/bot/keyboards/__init__.py`, `src/bot/handlers/start.py`, `src/bot/handlers/__init__.py`, `tests/unit/test_config.py`, `tests/unit/test_bot_dispatcher.py`, `tests/integration/test_bot_handlers.py`
+- Libraries to use: `aiogram>=3.0` (`Bot`, `Dispatcher`, `Router`, `BaseMiddleware`, `CommandStart`, `ParseMode`, `DefaultBotProperties`, `InlineKeyboardMarkup`, `InlineKeyboardButton`, `WebAppInfo`, `Message`, `User`), `pydantic-settings>=2.0` (`BaseSettings`, `SettingsConfigDict`), `sqlalchemy>=2.0` (`AsyncSession`, `async_sessionmaker`), `pytest`, `pytest-asyncio`, `unittest.mock` (`AsyncMock`, `MagicMock`, `patch`)
+- Do not add new dependencies to `pyproject.toml` without explicit permission per `Agents.md`
+- Follow testing conventions in `_docs/testing-guidelines.md` (isolated in-memory SQLite fixture `db_session`, `@pytest.mark.asyncio`, zero real network calls to Telegram API, REQ docstrings)
+- Follow Telegram bot formatting and UI guidelines in `_docs/design-system.md` (clean semantic emojis, HTML parse mode, max 2 buttons per row, `[🚀 Відкрити план]`)
+- Follow modular architectural structure defined in `_docs/schema.md`
+- Do not implement voice/text ingestion handlers, task parsing callbacks, API endpoints, or scheduler jobs in this task
 
 ## 7. Voice and Text Ingestion Bot Handlers
 Goal: Connect incoming Telegram voice notes and text messages to the AI parser with confirmation buttons.

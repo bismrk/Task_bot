@@ -1,6 +1,7 @@
 """Core application configuration and services."""
 
 from src.core.ai_client import get_ai_client
+from src.core.config import Settings, get_settings
 from src.core.database import (
     async_session_maker,
     configure_sqlite_pragmas,
@@ -16,4 +17,6 @@ __all__ = [
     "async_session_maker",
     "configure_sqlite_pragmas",
     "get_ai_client",
+    "Settings",
+    "get_settings",
 ]
