@@ -1,5 +1,6 @@
 """Pydantic schemas package."""
 
+from src.schemas.task import ExtractedTask, TaskExtractionResult
 from src.schemas.user import UserBase, UserCreate, UserRead, UserUpdate
 
 __all__ = [
@@ -7,4 +8,6 @@ __all__ = [
     "UserCreate",
     "UserUpdate",
     "UserRead",
+    "ExtractedTask",
+    "TaskExtractionResult",
 ]

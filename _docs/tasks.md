@@ -172,8 +172,74 @@ Implement the user service layer and Pydantic schemas providing asynchronous fun
 - Do not implement bot handlers, API endpoints, or background scheduler jobs in this task
 
 ## 4. Gemini AI Voice and Text Parser Service
-Goal: Build a service that extracts structured task definitions from voice audio or text using Gemini.
-Description: Integrate Google Gemini 2.5 Flash via the `google-genai` SDK using Pydantic structured output models to extract task title, target date, deadline, priority, and tag. Support direct ingestion of Telegram `.ogg` Opus audio bytes and plain text in a single unified parsing method. Write automated unit tests with mock responses or sample inputs to verify that parsed results conform to the target Pydantic schema.
+
+### Goal
+
+Build the Gemini AI client initialization, Pydantic schemas, and parser service to extract structured tasks (title, target date, deadline, priority, tag) from plain text and raw Telegram `.ogg` Opus audio bytes using Gemini 2.5 Flash structured outputs, with timezone-aware prompt contextualization, graceful edge case handling, and 100% mocked unit tests.
+
+### Acceptance criteria
+
+- [ ] `src/schemas/task.py` defines `ExtractedTask` model inheriting from Pydantic `BaseModel`.
+- [ ] `ExtractedTask.title` is defined as a non-empty string (`str`), stripped of leading and trailing whitespace, with a maximum length of 255 characters (REQ-AI-02).
+- [ ] `ExtractedTask.target_date` is defined as `datetime.date` (YYYY-MM-DD) representing the calendar date the task is planned for (REQ-AI-02).
+- [ ] `ExtractedTask.deadline_at` is defined as optional timezone-aware `datetime.datetime | None = None` (in UTC or with user timezone offset) if a specific time was mentioned, or `None` if no time was mentioned (REQ-AI-02).
+- [ ] `ExtractedTask.priority` is defined with type `TaskPriority` (values: `low`, `medium`, `high`) defaulting to `TaskPriority.medium` (REQ-AI-02).
+- [ ] `ExtractedTask.tag` is defined as optional `str | None = None` (maximum length 50 characters) stripped of any leading `#` symbol (e.g., `"робота"`), or `None` if no category was mentioned (REQ-AI-02).
+- [ ] `src/schemas/task.py` defines `TaskExtractionResult` model inheriting from Pydantic `BaseModel` containing `tasks: list[ExtractedTask] = Field(default_factory=list)` (REQ-AI-02).
+- [ ] `src/schemas/__init__.py` imports and exposes `ExtractedTask` and `TaskExtractionResult`.
+- [ ] `src/core/ai_client.py` defines `get_ai_client(api_key: str | None = None) -> genai.Client` that initializes and returns a `google.genai.Client` using the provided `api_key` or reading from the `GEMINI_API_KEY` environment variable.
+- [ ] Calling `get_ai_client()` when `GEMINI_API_KEY` is unset and no `api_key` parameter is provided raises `ValueError("GEMINI_API_KEY environment variable is not set")`.
+- [ ] `src/core/__init__.py` imports and exposes `get_ai_client`.
+- [ ] `src/services/ai_parser.py` defines `DEFAULT_MODEL: str = "gemini-2.5-flash"`.
+- [ ] `src/services/ai_parser.py` defines async `parse_tasks(content: str | bytes, mime_type: str = "text/plain", user_timezone: str = "Europe/Kyiv", reference_time: datetime | None = None, client: genai.Client | None = None) -> list[ExtractedTask]` supporting both text (`str`) and audio bytes (`bytes`).
+- [ ] `src/services/ai_parser.py` defines async `parse_tasks_from_text(text: str, user_timezone: str = "Europe/Kyiv", reference_time: datetime | None = None, client: genai.Client | None = None) -> list[ExtractedTask]` for text-based task extraction.
+- [ ] `src/services/ai_parser.py` defines async `parse_tasks_from_audio(audio_bytes: bytes, mime_type: str = "audio/ogg", user_timezone: str = "Europe/Kyiv", reference_time: datetime | None = None, client: genai.Client | None = None) -> list[ExtractedTask]` for audio-based task extraction (REQ-AI-01).
+- [ ] `parse_tasks` constructs a prompt / system instruction incorporating the user's local reference time (formatted as date, time, and day of week) and timezone identifier so relative expressions ("сьогодні", "завтра", "післязавтра", "у п'ятницю", "о 15:00") resolve to exact calendar dates and timezone-aware deadlines (REQ-AI-02).
+- [ ] `parse_tasks` configures Gemini generation using `types.GenerateContentConfig` with `response_mime_type="application/json"` and `response_schema=TaskExtractionResult`.
+- [ ] When passed audio bytes (`bytes`), `parse_tasks` packages the audio payload in-memory using `types.Part.from_bytes(data=content, mime_type=mime_type)` (default `mime_type="audio/ogg"`) without saving files to disk (REQ-AI-01).
+- [ ] Calling `parse_tasks` (or `parse_tasks_from_text`) with an empty or whitespace-only string returns an empty list `[]` immediately without invoking the Gemini client.
+- [ ] Calling `parse_tasks` (or `parse_tasks_from_audio`) with empty audio bytes `b""` returns an empty list `[]` immediately without invoking the Gemini client.
+- [ ] When Gemini returns an extraction result with `tasks: []` (input contains chit-chat, questions, background noise, or no actionable tasks), `parse_tasks` returns an empty list `[]` without raising an exception (REQ-AI-02).
+- [ ] If the Gemini response cannot be parsed into `TaskExtractionResult` or is malformed, `parse_tasks` catches the failure, logs an error, and returns an empty list `[]`.
+- [ ] If the Gemini API call encounters a network or service error, `parse_tasks` catches the error, logs it, and handles it gracefully without an unhandled crash.
+- [ ] When relative dates and specific times are specified (e.g. "Завтра о 15:00 здати звіт"), `deadline_at` is returned as a timezone-aware datetime matching the user's timezone converted to UTC (REQ-AI-02).
+- [ ] When task text indicates priority (e.g. "терміново", "важливо", "високий пріоритет"), `priority` is set to `TaskPriority.high`; for "низький" to `TaskPriority.low`; and defaults to `TaskPriority.medium` (REQ-AI-02).
+- [ ] Extracted tags are stripped of `#` prefixes, normalized, and trimmed to a maximum of 50 characters (REQ-AI-02).
+- [ ] `src/services/__init__.py` imports and exposes `parse_tasks`, `parse_tasks_from_text`, and `parse_tasks_from_audio`.
+- [ ] `tests/unit/test_ai_parser.py` contains unit tests verifying `get_ai_client()` behavior with and without `GEMINI_API_KEY`.
+- [ ] `tests/unit/test_ai_parser.py` contains unit tests verifying `ExtractedTask` and `TaskExtractionResult` validation, defaults, and serialization.
+- [ ] `tests/unit/test_ai_parser.py` contains unit tests verifying `parse_tasks_from_text` extraction of single and multiple tasks with title, target_date, deadline_at, priority, and tag (REQ-AI-02).
+- [ ] `tests/unit/test_ai_parser.py` contains unit tests verifying timezone-aware relative date resolution in prompt generation (REQ-AI-02).
+- [ ] `tests/unit/test_ai_parser.py` contains unit tests verifying `parse_tasks_from_audio` packaging of `audio/ogg` bytes with `types.Part.from_bytes` (REQ-AI-01).
+- [ ] `tests/unit/test_ai_parser.py` contains unit tests verifying that empty text, whitespace text, and empty audio bytes return `[]` without making API calls.
+- [ ] `tests/unit/test_ai_parser.py` contains unit tests verifying non-task inputs (filler/noise) return `[]` without exceptions (REQ-AI-02).
+- [ ] `tests/unit/test_ai_parser.py` contains unit tests verifying malformed API responses and API exceptions are handled cleanly.
+- [ ] All unit tests in `tests/unit/test_ai_parser.py` mock `google.genai.Client` and make 0 real network calls per `_docs/testing-guidelines.md`.
+- [ ] All test functions contain docstrings referencing requirement IDs (`REQ-AI-01`, `REQ-AI-02`).
+- [ ] Running `uv run pytest tests/unit/test_ai_parser.py` executes all AI parser tests and passes with 0 errors and 0 failures.
+- [ ] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- Telegram voice note file download from Telegram API and aiogram audio handlers, moved to #7
+- Telegram bot inline keyboard generation (`[✅ Зберегти]`, `[✏️ Виправити]`) and confirmation callbacks, moved to #7
+- Task database entity persistence, CRUD database operations, and rollover queries, moved to #5
+- Telegram bot dispatcher setup and `/start` onboarding command, moved to #6
+- Midnight rollover interactive dialogue flow (00:00 "Хвости"), moved to #8
+- FastAPI backend initialization and Telegram WebApp initData authentication, moved to #9
+- Mini App REST API endpoints for tasks, moved to #10
+- Frontend React Mini App checklist and task creation UI, moved to #11, #12
+- APScheduler timezone-aware background jobs (00:00 review & 09:00 push), moved to #13
+- Scheduled deadline proximity push notifications (-1h and -10m), moved to #14
+
+### Constraints
+
+- Files this should stay inside: `src/core/ai_client.py`, `src/core/__init__.py`, `src/schemas/task.py`, `src/schemas/__init__.py`, `src/services/ai_parser.py`, `src/services/__init__.py`, `tests/unit/test_ai_parser.py`
+- Libraries to use: `google-genai` (`from google import genai`, `from google.genai import types`), `pydantic>=2.0` (`BaseModel`, `Field`, `field_validator`, `ConfigDict`), `datetime` and `zoneinfo` (Python standard library), `pytest`, `pytest-asyncio`, `unittest.mock` (`AsyncMock`, `MagicMock`, `patch`)
+- Do not add new dependencies to `pyproject.toml` without explicit permission per `Agents.md`
+- Never make real network requests to Google Gemini or Telegram in automated tests per `_docs/testing-guidelines.md`
+- Follow modular architectural structure defined in `_docs/schema.md`
+- Do not implement database persistence, bot handlers, or API endpoints in this task
 
 ## 5. Task Management CRUD Service
 Goal: Provide core business logic to create, read, update, complete, and rollover tasks.
