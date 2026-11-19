@@ -111,8 +111,65 @@ Configure an asynchronous SQLAlchemy 2.0 database engine with SQLite WAL mode, f
 - Do not implement business logic services, bot handlers, or API routes in this task
 
 ## 3. User Service and Timezone Management
-Goal: Implement business logic to create, retrieve, and update user preferences and timezones.
-Description: Create a user service layer providing async functions to register new Telegram users and retrieve existing user profiles with default settings. Add functions to update user timezones (such as `Europe/Berlin` or `Europe/Kyiv`) and custom notification preferences. Write isolated unit tests using an in-memory SQLite database to confirm user creation and timezone modification.
+
+### Goal
+
+Implement the user service layer and Pydantic schemas providing asynchronous functions to register, retrieve, and update user profiles, validate IANA timezones with `zoneinfo`, and convert datetimes to user local time with complete unit test coverage.
+
+### Acceptance criteria
+
+- [ ] `src/schemas/user.py` defines Pydantic models `UserBase`, `UserCreate`, `UserUpdate`, and `UserRead`.
+- [ ] `UserBase` defines `timezone: str = "Europe/Kyiv"` with a field validator checking validity via `zoneinfo.ZoneInfo` and raising `ValueError` on invalid timezone strings.
+- [ ] `UserCreate` defines `telegram_id: int` and inherits `timezone: str = "Europe/Kyiv"`.
+- [ ] `UserUpdate` defines `timezone: str` with a field validator checking validity via `zoneinfo.ZoneInfo` and raising `ValueError` on invalid timezone strings.
+- [ ] `UserRead` defines `telegram_id: int`, `timezone: str`, and `created_at: datetime`, configured with `model_config = ConfigDict(from_attributes=True)`.
+- [ ] `src/schemas/__init__.py` imports and exposes `UserBase`, `UserCreate`, `UserUpdate`, and `UserRead`.
+- [ ] `src/services/user_service.py` defines `validate_timezone(timezone: str) -> str` that validates IANA timezone strings using `zoneinfo.ZoneInfo(timezone)` and raises `ValueError(f"Invalid timezone: {timezone}")` for invalid identifiers (REQ-USR-02).
+- [ ] `src/services/user_service.py` defines async `get_user(session: AsyncSession, telegram_id: int) -> User | None` returning the `User` database record if found, or `None` if the user does not exist.
+- [ ] `src/services/user_service.py` defines async `get_or_create_user(session: AsyncSession, telegram_id: int, timezone: str = "Europe/Kyiv") -> tuple[User, bool]` that inserts and commits a new `User` with default timezone `"Europe/Kyiv"` and returns `(user, True)` if no user exists for `telegram_id` (REQ-USR-01).
+- [ ] `get_or_create_user` is idempotent: calling it for an existing user returns `(user, False)` without overwriting the user's existing timezone or modifying other attributes (REQ-USR-01).
+- [ ] Calling `get_or_create_user` with an invalid timezone string for a non-existent user raises `ValueError` and does not insert any user record into the database.
+- [ ] `src/services/user_service.py` defines async `update_user_timezone(session: AsyncSession, telegram_id: int, timezone: str) -> User` that updates `user.timezone`, commits the transaction, and returns the updated `User` when given a valid IANA timezone (REQ-USR-02).
+- [ ] Calling `update_user_timezone` with an invalid timezone string (e.g. `"Mars/Olympus"`) raises `ValueError`, aborts modification, and preserves the user's previous timezone in the database (REQ-USR-02).
+- [ ] Calling `update_user_timezone` for a non-existent `telegram_id` raises `ValueError` indicating the user does not exist.
+- [ ] `src/services/user_service.py` defines `get_user_local_time(user: User, dt: datetime | None = None) -> datetime` returning a timezone-aware datetime in `user.timezone`.
+- [ ] `get_user_local_time` uses `datetime.now(timezone.utc)` when `dt is None`.
+- [ ] `get_user_local_time` treats naive datetime inputs as UTC before converting to `user.timezone`.
+- [ ] `src/services/__init__.py` imports and exposes `get_user`, `get_or_create_user`, `update_user_timezone`, `get_user_local_time`, and `validate_timezone`.
+- [ ] `tests/unit/test_user_service.py` contains automated tests using the in-memory SQLite fixture `db_session` verifying new user creation via `get_or_create_user` with default `"Europe/Kyiv"` timezone (REQ-USR-01).
+- [ ] `tests/unit/test_user_service.py` contains automated tests verifying `get_or_create_user` idempotency and preservation of existing custom timezones (REQ-USR-01).
+- [ ] `tests/unit/test_user_service.py` contains automated tests verifying `get_or_create_user` with invalid timezone raises `ValueError` and does not persist data.
+- [ ] `tests/unit/test_user_service.py` contains automated tests verifying `get_user` returns `User` for existing records and `None` for non-existent records.
+- [ ] `tests/unit/test_user_service.py` contains automated tests verifying `update_user_timezone` successfully updates and commits valid IANA timezones (REQ-USR-02).
+- [ ] `tests/unit/test_user_service.py` contains automated tests verifying `update_user_timezone` with invalid timezone raises `ValueError` and leaves the database record unmodified (REQ-USR-02).
+- [ ] `tests/unit/test_user_service.py` contains automated tests verifying `update_user_timezone` for non-existent user raises `ValueError`.
+- [ ] `tests/unit/test_user_service.py` contains automated tests verifying `get_user_local_time` with default (`None`), explicit UTC, and naive datetimes.
+- [ ] `tests/unit/test_user_service.py` contains automated tests verifying Pydantic models `UserCreate`, `UserUpdate`, and `UserRead` validation and serialization.
+- [ ] All test functions in `tests/unit/test_user_service.py` contain docstrings referencing requirement IDs (e.g. `REQ-USR-01`, `REQ-USR-02`) per testing guidelines.
+- [ ] Running `uv run pytest` discovers and executes all tests in `tests/unit/test_user_service.py` and passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- Telegram bot `/start` command registration handler and onboarding welcome message, moved to #6
+- Custom notification preferences, reminder interval settings, and `/settings` bot/Mini App UI, moved to #17
+- Task management CRUD operations and rollover logic, moved to #5
+- Gemini AI client, audio ingestion, and structured parser service, moved to #4
+- Voice and text message handlers with confirmation buttons, moved to #7
+- Midnight rollover interactive dialogue flow (00:00), moved to #8
+- FastAPI backend initialization and Telegram WebApp initData authentication, moved to #9
+- Mini App REST API endpoints for tasks, moved to #10
+- Frontend React + Vite + Tailwind Mini App setup, moved to #11
+- APScheduler timezone-aware background jobs (00:00 & 09:00 triggers), moved to #13
+- Deadline notification reminders (-1h & -10m), moved to #14
+
+### Constraints
+
+- Files this should stay inside: `src/schemas/user.py`, `src/schemas/__init__.py`, `src/services/user_service.py`, `src/services/__init__.py`, `tests/unit/test_user_service.py`
+- Libraries to use: `zoneinfo` (Python standard library), `datetime` (Python standard library), `pydantic>=2.0` (`BaseModel`, `ConfigDict`, `field_validator`), `sqlalchemy>=2.0` (`select`, `AsyncSession`), `pytest`, `pytest-asyncio`
+- Do not add new dependencies to `pyproject.toml` without asking per `Agents.md`
+- Follow testing conventions in `_docs/testing-guidelines.md` (isolated in-memory SQLite fixture `db_session`, `@pytest.mark.asyncio`, REQ docstrings)
+- Follow modular architecture defined in `_docs/schema.md`
+- Do not implement bot handlers, API endpoints, or background scheduler jobs in this task
 
 ## 4. Gemini AI Voice and Text Parser Service
 Goal: Build a service that extracts structured task definitions from voice audio or text using Gemini.
