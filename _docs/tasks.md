@@ -577,8 +577,84 @@ Build the interactive Telegram midnight rollover dialogue and callback handlers 
 - Do not implement background scheduler jobs (#13), API endpoints (#9, #10), or Mini App UI (#11, #12) in this task
 
 ## 9. FastAPI Backend Initialization and Telegram initData Auth
-Goal: Set up the FastAPI server with middleware and secure Telegram Mini App authentication.
-Description: Initialize the FastAPI application with CORS middleware, shared asynchronous database session dependencies, and health check endpoints. Implement an authentication dependency that verifies the Telegram WebApp `initData` HMAC-SHA256 signature against the bot token and extracts the authenticated user ID. Write unit tests testing endpoint access with valid, expired, and tampered `initData` parameters.
+
+### Goal
+
+Initialize the FastAPI application with CORS middleware, health check, and asynchronous database session dependency injection, and implement secure Telegram Mini App authentication that validates `initData` HMAC-SHA256 signatures, enforces 24-hour expiration, and extracts authenticated users with comprehensive integration tests.
+
+### Acceptance criteria
+
+- [ ] `src/api/deps.py` defines async generator dependency `get_db_session(request: Request) -> AsyncGenerator[AsyncSession, None]` that retrieves the sessionmaker from `request.app.state.sessionmaker` (or defaults to `src.core.database.async_session_maker`), yields an `AsyncSession`, commits on success, rolls back on exception, and closes the session upon exit.
+- [ ] `src/api/deps.py` imports and exposes `get_db_session`.
+- [ ] `src/api/auth.py` defines `validate_init_data(raw_init_data: str, bot_token: str, max_age_seconds: int = 86400) -> dict[str, Any]` validating Telegram WebApp `initData` per official Telegram specifications (REQ-API-01).
+- [ ] `validate_init_data` extracts and parses URL-encoded query parameters from `raw_init_data`.
+- [ ] If `hash` parameter is missing from `raw_init_data`, `validate_init_data` raises `HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing hash in initData")` (REQ-API-01).
+- [ ] If `auth_date` parameter is missing or cannot be parsed as an integer Unix timestamp, `validate_init_data` raises `HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid auth_date in initData")` (REQ-API-01).
+- [ ] `validate_init_data` enforces expiration: if `current_timestamp - auth_date > max_age_seconds` (default 86400s / 24h), it raises `HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Telegram initData has expired")` (REQ-API-01).
+- [ ] If `auth_date` is in the future beyond acceptable clock drift (e.g. `auth_date - current_timestamp > 60`), `validate_init_data` raises `HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Telegram initData auth_date is in the future")`.
+- [ ] `validate_init_data` constructs data-check string by filtering out `hash`, sorting remaining key-value pairs alphabetically by key, and joining them with `\n` in `key=value` format.
+- [ ] `validate_init_data` computes secret key using `hmac.new(key=b"WebAppData", msg=bot_token.encode("utf-8"), digestmod=hashlib.sha256).digest()`.
+- [ ] `validate_init_data` calculates expected signature via `hmac.new(key=secret_key, msg=data_check_string.encode("utf-8"), digestmod=hashlib.sha256).hexdigest()`.
+- [ ] `validate_init_data` verifies calculated signature against extracted `hash` using constant-time comparison `hmac.compare_digest`. If signatures do not match (tampered parameters or wrong bot token), it raises `HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Telegram initData signature")` (REQ-API-01).
+- [ ] `validate_init_data` parses `user` parameter as JSON. If `user` parameter is missing, invalid JSON, or missing `id`, it raises `HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid user object in initData")`.
+- [ ] `validate_init_data` returns the validated dictionary containing parsed parameters with `"user"` parsed into a Python dictionary.
+- [ ] `src/api/auth.py` defines FastAPI dependency `get_current_user_id(request: Request, settings: Settings = Depends(get_settings)) -> int`.
+- [ ] `get_current_user_id` extracts raw initData from either `Authorization` header (supporting `tma <raw_init_data>` and `Bearer <raw_init_data>` prefixes case-insensitively) or `X-Telegram-Init-Data` header.
+- [ ] If authorization headers are missing, empty, or use an unrecognized scheme, `get_current_user_id` raises `HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid authentication credentials")`.
+- [ ] `get_current_user_id` obtains `bot_token` from `request.app.state.settings.BOT_TOKEN` or `settings.BOT_TOKEN`, calls `validate_init_data`, and returns `int(parsed_data["user"]["id"])`.
+- [ ] `src/api/auth.py` defines FastAPI dependency `get_current_user(user_id: int = Depends(get_current_user_id), session: AsyncSession = Depends(get_db_session)) -> User`.
+- [ ] `get_current_user` calls `get_or_create_user(session, telegram_id=user_id)` to retrieve existing user or automatically provision new user with default timezone `"Europe/Kyiv"`, ensuring seamless onboarding for direct Mini App launches, and returns the `User` record (REQ-USR-01, REQ-NFR-02).
+- [ ] `src/api/auth.py` imports and exposes `validate_init_data`, `get_current_user_id`, and `get_current_user`.
+- [ ] `src/api/app.py` defines factory function `create_app(settings: Settings | None = None, sessionmaker: async_sessionmaker[AsyncSession] | None = None) -> FastAPI`.
+- [ ] `create_app` stores `settings` in `app.state.settings` (falling back to `get_settings()` if None).
+- [ ] `create_app` stores `sessionmaker` in `app.state.sessionmaker` (falling back to `src.core.database.async_session_maker` if None).
+- [ ] `create_app` adds `CORSMiddleware` configured with `allow_origins=["*"]`, `allow_credentials=True`, `allow_methods=["*"]`, and `allow_headers=["*"]` to support Telegram WebApp client environments.
+- [ ] `create_app` defines public health check endpoint `GET /health` returning `{"status": "ok"}` with HTTP 200 without requiring authentication.
+- [ ] `create_app` defines protected endpoint `GET /api/me` returning `UserRead` with HTTP 200 for the authenticated user using `Depends(get_current_user)`.
+- [ ] `src/api/__init__.py` imports and exposes `create_app`, `get_current_user_id`, `get_current_user`, `get_db_session`, and `validate_init_data`.
+- [ ] `tests/integration/test_api_auth.py` provides test helper `create_test_init_data(user_data: dict, bot_token: str, auth_date: int | None = None) -> str` generating cryptographically valid signed Telegram `initData` query strings.
+- [ ] `tests/integration/test_api_auth.py` contains automated tests using `TestClient` verifying `GET /health` returns HTTP 200 and `{"status": "ok"}` with no authentication headers.
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying CORS preflight/response headers include `access-control-allow-origin`.
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `GET /api/me` with valid `initData` via `Authorization: tma <initData>` returns HTTP 200 and JSON matching `UserRead` schema (`telegram_id`, `timezone`, `created_at`) (REQ-API-01).
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `GET /api/me` with valid `initData` via `Authorization: Bearer <initData>` returns HTTP 200 (REQ-API-01).
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `GET /api/me` with valid `initData` via `X-Telegram-Init-Data` header returns HTTP 200 (REQ-API-01).
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `GET /api/me` with tampered `initData` (altered user attributes or query values) returns HTTP 401 Unauthorized (REQ-API-01).
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `GET /api/me` with signature signed by an invalid bot token returns HTTP 401 Unauthorized (REQ-API-01).
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `GET /api/me` with expired `auth_date` (> 86400s) returns HTTP 401 Unauthorized (REQ-API-01).
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `GET /api/me` with future `auth_date` returns HTTP 401 Unauthorized.
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `GET /api/me` with missing `hash` returns HTTP 401 Unauthorized (REQ-API-01).
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `GET /api/me` with missing `auth_date` returns HTTP 401 Unauthorized (REQ-API-01).
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `GET /api/me` with missing `user` parameter returns HTTP 401 Unauthorized (REQ-API-01).
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `GET /api/me` with missing authorization headers returns HTTP 401 Unauthorized.
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `GET /api/me` with malformed header scheme (e.g. `Authorization: Basic 12345`) returns HTTP 401 Unauthorized.
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `get_current_user` provisions new user record in database if user does not exist upon initial Mini App authentication (REQ-USR-01).
+- [ ] `tests/integration/test_api_auth.py` contains automated tests verifying `get_current_user` returns existing user record without duplicating or overwriting existing timezone (REQ-USR-01, REQ-NFR-02).
+- [ ] All tests execute against an isolated in-memory SQLite database sessionmaker with zero real network requests per `_docs/testing-guidelines.md`.
+- [ ] All test functions contain docstrings referencing requirement IDs (`REQ-API-01`, `REQ-USR-01`, `REQ-NFR-02`).
+- [ ] Running `uv run pytest tests/integration/test_api_auth.py` passes with 0 errors and 0 failures.
+- [ ] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- Mini App REST API endpoints for tasks (`GET /api/tasks`, `POST /api/tasks`, `PATCH /api/tasks/{id}`, `DELETE /api/tasks/{id}`), moved to #10
+- Frontend React + Vite + Tailwind Mini App scaffold and Telegram WebApp SDK initialization, moved to #11
+- Mini App interactive today checklist UI and task creation modal, moved to #12
+- Timezone-aware background scheduler jobs (00:00 rollover & 09:00 push), moved to #13
+- Scheduled deadline proximity push notifications (-1h and -10m), moved to #14
+- Mini App calendar view and activity indicator endpoints, moved to #15
+- Mini App productivity dashboard and streak analytics endpoints, moved to #16
+- User settings endpoints and UI, moved to #17
+- Production deployment, Docker Compose, and unified runner script (`main.py`), moved to #18
+
+### Constraints
+
+- Files this should stay inside: `src/api/app.py`, `src/api/auth.py`, `src/api/deps.py`, `src/api/routes/__init__.py`, `src/api/__init__.py`, `tests/integration/test_api_auth.py`
+- Libraries to use: `fastapi` (`FastAPI`, `Depends`, `HTTPException`, `status`, `Request`), `fastapi.middleware.cors.CORSMiddleware`, `fastapi.testclient.TestClient`, `pydantic>=2.0`, `sqlalchemy>=2.0` (`AsyncSession`, `async_sessionmaker`), Python standard library (`hmac`, `hashlib`, `urllib.parse`, `json`, `time`), `pytest`, `pytest-asyncio`
+- Do not add new dependencies to `pyproject.toml` without explicit permission per `Agents.md`
+- Follow testing conventions in `_docs/testing-guidelines.md` (isolated in-memory SQLite fixture, `@pytest.mark.asyncio`, zero real network requests, REQ docstrings)
+- Enforce tenant isolation and authentication security per `REQ-API-01` and `REQ-NFR-02`
+- Follow modular architectural structure defined in `_docs/schema.md`
+- Do not implement task CRUD endpoints (#10) or frontend components (#11, #12) in this task
 
 ## 10. Task REST API Endpoints for Mini App
 Goal: Expose REST endpoints for retrieving, creating, updating, and toggling tasks from the Mini App.
