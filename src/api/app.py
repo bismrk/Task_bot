@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.api.auth import get_current_user
+from src.api.routes import tasks_router
 from src.core.config import Settings, get_settings
 from src.core.database import async_session_maker
 from src.models.user import User
@@ -36,6 +37,8 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    app.include_router(tasks_router)
 
     @app.get("/health")
     async def health_check() -> dict[str, str]:
