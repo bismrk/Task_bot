@@ -402,8 +402,86 @@ Configure the application settings using `pydantic-settings`, initialize the `ai
 - Do not implement voice/text ingestion handlers, task parsing callbacks, API endpoints, or scheduler jobs in this task
 
 ## 7. Voice and Text Ingestion Bot Handlers
-Goal: Connect incoming Telegram voice notes and text messages to the AI parser with confirmation buttons.
-Description: Implement `aiogram 3` message handlers for voice notes and text messages that download the audio buffer or read text and pass it to the AI parser service. Format the extracted tasks into an interactive message accompanied by inline keyboard buttons (`Зберегти` / `Виправити`). Save confirmed tasks into the database and notify the user with a formatted confirmation upon button click.
+
+### Goal
+
+Implement `aiogram 3` message and callback handlers for voice notes and text messages that download audio into memory or read text, extract structured tasks using the Gemini AI parser service with user timezone context, present parsed tasks with inline confirmation buttons (`[✅ Зберегти]` and `[✏️ Виправити]`), persist confirmed tasks to the database via batch creation, and enforce tenant security with 100% mocked integration tests.
+
+### Acceptance criteria
+
+- [ ] `src/bot/keyboards/tasks.py` defines `TaskConfirmCallback` inheriting from `aiogram.filters.callback_data.CallbackData` with prefix `"task_confirm"` and fields `action: str` (values: `"save"`, `"edit"`) and `user_id: int`.
+- [ ] `src/bot/keyboards/tasks.py` defines `get_task_confirmation_keyboard(user_id: int) -> InlineKeyboardMarkup` returning an inline keyboard with positive confirmation `[✅ Зберегти]` and modification `[✏️ Виправити]` arranged with a maximum of 2 buttons per row per `_docs/design-system.md`.
+- [ ] `src/bot/keyboards/__init__.py` imports and exposes `TaskConfirmCallback` and `get_task_confirmation_keyboard`.
+- [ ] `src/bot/states/tasks.py` defines `TaskIngestionState` inheriting from `aiogram.fsm.state.StatesGroup` with state `waiting_confirmation = State()`.
+- [ ] `src/bot/states/__init__.py` imports and exposes `TaskIngestionState`.
+- [ ] `src/bot/handlers/voice_text.py` defines helper `format_extracted_tasks_message(tasks: list[ExtractedTask]) -> str` that formats extracted tasks into an HTML-formatted message with a bold header (`<b>📋 Розпізнані завдання:</b>`), bulleted items with task titles, priority badges (`⚠️ Високий`, `⚡ Середній`, `💤 Низький`), category tags (`🏷️ #{tag}`), target dates (`📅 {target_date}`), and formatted deadlines (`🕒 до {time}`) per `_docs/design-system.md`.
+- [ ] `src/bot/handlers/voice_text.py` defines `router = Router(name="voice_text")` (or `voice_text_router`).
+- [ ] `src/bot/handlers/voice_text.py` defines async handler `handle_voice_message(message: Message, bot: Bot, session: AsyncSession, state: FSMContext) -> Message | None` filtered by `F.voice`.
+- [ ] If `message.from_user` is `None` or `message.voice` is `None`, `handle_voice_message` returns immediately without errors or database modifications.
+- [ ] `handle_voice_message` calls `get_or_create_user(session, telegram_id=message.from_user.id)` to obtain the user's configured `user.timezone` (REQ-USR-01).
+- [ ] `handle_voice_message` dispatches chat action `upload_voice` (or `record_voice` / `typing`) via `bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VOICE)` while processing audio (REQ-AI-01).
+- [ ] `handle_voice_message` downloads audio bytes directly into memory via `bot.download(message.voice.file_id, destination=io.BytesIO())` without saving temporary files to disk (REQ-AI-01).
+- [ ] `handle_voice_message` invokes `parse_tasks_from_audio(audio_bytes=..., user_timezone=user.timezone)` with the in-memory audio bytes and user timezone (REQ-AI-01, REQ-AI-02).
+- [ ] `src/bot/handlers/voice_text.py` defines async handler `handle_text_message(message: Message, bot: Bot, session: AsyncSession, state: FSMContext) -> Message | None` filtered by `F.text & ~F.text.startswith("/")`.
+- [ ] If `message.from_user` is `None` or `message.text` is empty or whitespace-only, `handle_text_message` returns immediately without errors or database modifications.
+- [ ] `handle_text_message` calls `get_or_create_user(session, telegram_id=message.from_user.id)` to obtain `user.timezone` (REQ-USR-01).
+- [ ] `handle_text_message` dispatches chat action `typing` via `bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)` while processing text (REQ-AI-02).
+- [ ] `handle_text_message` invokes `parse_tasks_from_text(text=message.text, user_timezone=user.timezone)` with the message text and user timezone (REQ-AI-02).
+- [ ] When AI extraction returns an empty list `tasks: []` (chit-chat, noise, or no actionable tasks), the bot replies with a polite notification message (e.g. `💡 Не вдалося розпізнати завдання. Спробуйте надиктувати або написати чіткіше.`), attaches no confirmation keyboard, and does not enter `waiting_confirmation` FSM state (REQ-AI-02).
+- [ ] When AI extraction returns one or more tasks (`tasks: list[ExtractedTask]`):
+  - Extracted tasks are serialized and stored in FSM state data via `await state.update_data(pending_tasks=[t.model_dump(mode="json") for t in tasks])`.
+  - FSM state is set to `TaskIngestionState.waiting_confirmation` via `await state.set_state(...)`.
+  - Bot replies with the formatted tasks message and attaches `get_task_confirmation_keyboard(user_id=message.from_user.id)` (REQ-AI-03).
+- [ ] `src/bot/handlers/callbacks.py` defines `router = Router(name="callbacks")` (or callback handler registered in `src/bot/handlers/voice_text.py`) handling `TaskConfirmCallback.filter()`.
+- [ ] Tenant Security: If `callback_query.from_user.id != callback_data.user_id`, the callback is rejected immediately with alert `await callback_query.answer("⚠️ Ви не можете керувати завданнями іншого користувача.", show_alert=True)` without altering database or FSM state (REQ-AI-03, REQ-NFR-02).
+- [ ] Confirmation Callback (`action == "save"`):
+  - Deserializes pending tasks from FSM state data into `list[ExtractedTask]`.
+  - If pending tasks exist in state, persists tasks via `create_tasks_batch(session, user_id=callback_query.from_user.id, tasks=extracted_tasks)` in a single database transaction with status `todo` (REQ-TSK-01, REQ-AI-03).
+  - Edits original message to remove the inline keyboard and display confirmation text (`✅ <b>Завдання успішно збережено!</b>`) (REQ-AI-03).
+  - Clears FSM state via `await state.clear()`.
+  - Acknowledges callback with `await callback_query.answer("Збережено!")`.
+  - If pending tasks are missing from state (session expired or already saved), alerts user via `await callback_query.answer("⚠️ Завдання вже збережено або сесія застаріла.", show_alert=True)` and removes the keyboard from message.
+- [ ] Edit Callback (`action == "edit"`):
+  - Clears FSM state via `await state.clear()`.
+  - Edits message or sends prompt instructing the user to dictate or type again (`✏️ Будь ласка, надиктуйте або надішліть текстом нове формулювання завдань.`) and removes the confirmation keyboard (REQ-AI-03).
+  - Acknowledges callback with `await callback_query.answer()`.
+- [ ] `src/bot/handlers/__init__.py` imports and exposes `voice_text_router` and `callbacks_router` (or combined `task_router`).
+- [ ] `src/bot/dispatcher.py` updates `create_dispatcher` to include `voice_text_router` and `callbacks_router` alongside `start_router`.
+- [ ] `tests/integration/test_task_ingestion_handlers.py` contains automated integration tests verifying voice message handling: mocks `bot.download` returning `io.BytesIO` audio bytes, mocks `parse_tasks_from_audio`, asserts chat action is sent, tasks are formatted with inline keyboard, and serialized tasks are saved in FSM state (REQ-AI-01, REQ-AI-02).
+- [ ] `tests/integration/test_task_ingestion_handlers.py` contains automated integration tests verifying text message handling: sends plain text, mocks `parse_tasks_from_text`, asserts typing action is sent, tasks are presented with inline keyboard, and FSM state is updated (REQ-AI-02).
+- [ ] `tests/integration/test_task_ingestion_handlers.py` contains automated integration tests verifying command messages (`/start`, `/settings`) are ignored by `handle_text_message` and not parsed as tasks.
+- [ ] `tests/integration/test_task_ingestion_handlers.py` contains automated integration tests verifying empty extraction results (`tasks: []`): sends voice/text returning `[]`, asserts friendly message without keyboard is sent, and FSM state remains empty (REQ-AI-02).
+- [ ] `tests/integration/test_task_ingestion_handlers.py` contains automated integration tests verifying `[✅ Зберегти]` callback: persists tasks in database with status `todo` and `user_id`, edits message to confirmation text without keyboard, and clears FSM state (REQ-AI-03).
+- [ ] `tests/integration/test_task_ingestion_handlers.py` contains automated integration tests verifying `[✏️ Виправити]` callback: prompts user to re-dictate or re-type, removes keyboard, and clears FSM state (REQ-AI-03).
+- [ ] `tests/integration/test_task_ingestion_handlers.py` contains automated integration tests verifying tenant security: callback query from an unauthorized user (`callback_query.from_user.id != callback_data.user_id`) triggers `answer_callback_query(show_alert=True)` and does not persist tasks or clear owner state (REQ-AI-03, REQ-NFR-02).
+- [ ] `tests/integration/test_task_ingestion_handlers.py` contains automated integration tests verifying expired or missing FSM state on callback triggers alert without raising unhandled exceptions.
+- [ ] All integration tests use the in-memory SQLite fixture `db_session` and 100% mocked Telegram API and Gemini calls with zero real network requests per `_docs/testing-guidelines.md`.
+- [ ] All test functions contain docstrings referencing requirement IDs (`REQ-AI-01`, `REQ-AI-02`, `REQ-AI-03`, `REQ-TSK-01`).
+- [ ] Running `uv run pytest tests/integration/test_task_ingestion_handlers.py` passes with 0 errors and 0 failures.
+- [ ] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- Midnight rollover interactive dialogue flow (00:00 "Хвости" bot UI), moved to #8
+- FastAPI backend initialization, WebApp initData HMAC-SHA256 authentication, and health check endpoints, moved to #9
+- Mini App REST API endpoints for tasks (`/api/tasks`), moved to #10
+- Frontend React Mini App checklist and task creation UI, moved to #11, #12
+- Recurring task automatic generation logic across days (REQ-TMA-02), moved to #12
+- APScheduler timezone-aware background jobs (00:00 rollover & 09:00 push), moved to #13
+- Scheduled deadline proximity push notifications (-1h and -10m), moved to #14
+- Interactive task editing (individual field modification UI / modal or fine-grained editing flow) beyond prompt-to-redictate, moved to #12
+- User `/settings` command handler and timezone configuration UI, moved to #17
+
+### Constraints
+
+- Files this should stay inside: `src/bot/keyboards/tasks.py`, `src/bot/keyboards/__init__.py`, `src/bot/states/tasks.py`, `src/bot/states/__init__.py`, `src/bot/handlers/voice_text.py`, `src/bot/handlers/callbacks.py`, `src/bot/handlers/__init__.py`, `src/bot/dispatcher.py`, `tests/integration/test_task_ingestion_handlers.py`
+- Libraries to use: `aiogram>=3.0` (`Bot`, `Dispatcher`, `Router`, `F`, `ChatAction`, `Message`, `CallbackQuery`, `InlineKeyboardMarkup`, `InlineKeyboardButton`, `CallbackData`, `FSMContext`, `State`, `StatesGroup`, `MemoryStorage`), `sqlalchemy>=2.0` (`AsyncSession`), `pydantic>=2.0`, `pytest`, `pytest-asyncio`, `unittest.mock` (`AsyncMock`, `MagicMock`, `patch`)
+- Do not add new dependencies to `pyproject.toml` without explicit permission per `Agents.md`
+- Never save voice audio files to disk; audio buffers must be downloaded and parsed strictly in memory (`io.BytesIO`) per REQ-AI-01
+- Never make real network requests to Telegram or Google Gemini in automated tests per `_docs/testing-guidelines.md`
+- Follow Telegram bot formatting and UI guidelines in `_docs/design-system.md` (clean semantic emojis, HTML parse mode, max 2 buttons per row, `[✅ Зберегти]`, `[✏️ Виправити]`)
+- Follow modular architectural structure defined in `_docs/schema.md`
+- Do not implement rollover dialogue (#8), API endpoints (#9, #10), Mini App UI (#11, #12), or scheduler jobs (#13, #14) in this task
 
 ## 8. Midnight Rollover Flow (00:00 "Хвости")
 Goal: Build the interactive Telegram dialogue for reviewing uncompleted tasks at midnight.
