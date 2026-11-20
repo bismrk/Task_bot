@@ -5,7 +5,12 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.bot.handlers import callbacks_router, start_router, voice_text_router
+from src.bot.handlers import (
+    callbacks_router,
+    rollover_router,
+    start_router,
+    voice_text_router,
+)
 from src.bot.middlewares import DbSessionMiddleware
 from src.core.config import get_settings
 
@@ -37,7 +42,7 @@ def create_dispatcher(
 
     Attaches DbSessionMiddleware to message and callback_query routers,
     passes webapp_url into workflow data, and includes start_router,
-    voice_text_router, and callbacks_router.
+    voice_text_router, callbacks_router, and rollover_router.
     """
     dp = Dispatcher()
 
@@ -50,7 +55,7 @@ def create_dispatcher(
     dp.callback_query.middleware(db_middleware)
 
     # Detach routers if previously attached in factory context, then include
-    for r in (start_router, voice_text_router, callbacks_router):
+    for r in (start_router, voice_text_router, callbacks_router, rollover_router):
         if r._parent_router is not None:
             r._parent_router = None
         dp.include_router(r)
