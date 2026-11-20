@@ -1,8 +1,15 @@
 """FastAPI application factory and route registration."""
 
+from pathlib import Path
+from typing import Final
+
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.exceptions import HTTPException
+from starlette.responses import Response
+from starlette.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from src.api.auth import get_current_user
 from src.api.routes import tasks_router
@@ -11,10 +18,32 @@ from src.core.database import async_session_maker
 from src.models.user import User
 from src.schemas.user import UserRead
 
+DEFAULT_FRONTEND_DIST: Final[Path] = (
+    Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+)
+
+
+class SPAStaticFiles(StaticFiles):
+    """Static file handler with SPA fallback for client-side routing."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        """Serve requested static file, or fallback to index.html for non-API client routes."""
+        cleaned_path = path.lstrip("/")
+        try:
+            response = await super().get_response(path, scope)
+            if response.status_code == 404 and not cleaned_path.startswith("api"):
+                return await super().get_response("index.html", scope)
+            return response
+        except HTTPException as exc:
+            if exc.status_code == 404 and not cleaned_path.startswith("api"):
+                return await super().get_response("index.html", scope)
+            raise
+
 
 def create_app(
     settings: Settings | None = None,
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    frontend_dist: Path | str | None = None,
 ) -> FastAPI:
     """Create and configure a FastAPI application instance."""
     resolved_settings = settings if settings is not None else get_settings()
@@ -50,7 +79,15 @@ def create_app(
         """Return the profile of the authenticated Telegram user."""
         return current_user
 
+    dist_path = (
+        Path(frontend_dist)
+        if frontend_dist is not None
+        else DEFAULT_FRONTEND_DIST
+    )
+    if dist_path.is_dir():
+        app.mount("/", SPAStaticFiles(directory=dist_path, html=True), name="frontend")
+
     return app
 
 
-__all__ = ["create_app"]
+__all__ = ["DEFAULT_FRONTEND_DIST", "SPAStaticFiles", "create_app"]

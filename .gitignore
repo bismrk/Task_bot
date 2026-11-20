@@ -46,6 +46,7 @@ logs/
 
 # Frontend / Node (for TMA)
 node_modules/
+frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 .npm
