@@ -749,8 +749,84 @@ Build and register authenticated REST API endpoints under `/api/tasks` in FastAP
 - Do not implement frontend UI components or background scheduler jobs in this task
 
 ## 11. Telegram Mini App Frontend Setup
-Goal: Initialize the React Mini App with Vite, Tailwind CSS, and Telegram WebApp SDK integration.
-Description: Scaffold a React application using Vite, Tailwind CSS, and `@telegram-apps/sdk-react` to support native Telegram color schemes and viewport expansion. Set up an API client with Axios or Fetch that automatically retrieves `initData` from the Telegram SDK and attaches it to authorization headers. Verify that the build succeeds and renders an initial greeting screen inside Telegram WebApp desktop and mobile clients.
+
+### Goal
+
+Scaffold and configure the Telegram Mini App frontend inside `frontend/` using Vite, React, TypeScript, Tailwind CSS, and `@telegram-apps/sdk-react`, integrating Telegram WebApp theme variables and viewport expansion, setting up an authenticated API client with mock fallback for local browser development, implementing an initial greeting screen calling `GET /api/me`, serving the built frontend assets from FastAPI with SPA routing fallback, and verifying the setup with automated tests.
+
+### Acceptance criteria
+
+- [ ] `frontend/` directory is created in repository root containing the Vite + React + TypeScript + Tailwind CSS project structure.
+- [ ] `frontend/package.json` defines project metadata (`"type": "module"`), dependencies (`react`, `react-dom`, `@telegram-apps/sdk-react`, `lucide-react`), and devDependencies (`vite`, `@vitejs/plugin-react`, `typescript`, `@types/react`, `@types/react-dom`, `tailwindcss`, `postcss`, `autoprefixer`).
+- [ ] `frontend/package.json` defines scripts: `"dev": "vite"`, `"build": "tsc && vite build"`, `"preview": "vite preview"`, and `"typecheck": "tsc --noEmit"`.
+- [ ] `frontend/vite.config.ts` configures `@vitejs/plugin-react`, sets `build.outDir` to `"dist"`, and configures development proxy for `/api` pointing to FastAPI backend (e.g. `http://localhost:8000`).
+- [ ] `frontend/tsconfig.json` and `frontend/tsconfig.node.json` configure TypeScript with strict type checking enabled, `"jsx": "react-jsx"`, and Vite module resolution.
+- [ ] `frontend/tailwind.config.js` and `frontend/postcss.config.js` configure content paths `["./index.html", "./src/**/*.{js,ts,jsx,tsx}"]` and theme color tokens mapping to Telegram CSS variables:
+  - `bg-background`: `var(--tg-theme-bg-color, #ffffff)`
+  - `bg-secondary`: `var(--tg-theme-secondary-bg-color, #f4f4f5)`
+  - `text-foreground`: `var(--tg-theme-text-color, #000000)`
+  - `text-muted`: `var(--tg-theme-hint-color, #71717a)`
+  - `bg-primary`: `var(--tg-theme-button-color, #2481cc)`
+  - `text-primary-foreground`: `var(--tg-theme-button-text-color, #ffffff)`.
+- [ ] `frontend/index.html` includes viewport `<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">`, loads `<script src="https://telegram.org/js/telegram-web-app.js"></script>`, and mounts root `<div id="root"></div>`.
+- [ ] `frontend/src/index.css` imports Tailwind directives (`@tailwind base; @tailwind components; @tailwind utilities;`), defines fallback Telegram theme CSS variables, and adds mobile safe-area padding support (`env(safe-area-inset-top)` and `env(safe-area-inset-bottom)`).
+- [ ] `frontend/src/main.tsx` mounts the application root component wrapped in `<React.StrictMode>`.
+- [ ] On application mount, the Mini App invokes `ready()` and `expand()` via the Telegram WebApp SDK or `window.Telegram?.WebApp` to expand the viewport per `_docs/design-system.md`.
+- [ ] The app handles initialization outside the Telegram client environment (e.g. in standard desktop web browsers) safely without throwing unhandled exceptions or crashing.
+- [ ] Theme detection identifies whether the Telegram client is in dark mode or light mode (via Telegram `colorScheme` or `isDark` boolean) and applies corresponding styling.
+- [ ] `frontend/src/api/types.ts` defines TypeScript interface `UserProfile` matching the backend `UserRead` schema (`telegram_id: number; timezone: string; created_at: string;`).
+- [ ] `frontend/src/api/client.ts` implements a centralized HTTP client helper that extracts raw `initData` from the Telegram SDK launch parameters or `window.Telegram?.WebApp?.initData`.
+- [ ] If `initData` is empty/absent (e.g. browser development outside Telegram), `client.ts` falls back to mock credentials or `VITE_DEV_INIT_DATA` environment variable to enable local development and testing.
+- [ ] All outgoing API requests from `frontend/src/api/client.ts` automatically attach the `Authorization: tma <raw_init_data>` header when `initData` is available (REQ-API-01).
+- [ ] `frontend/src/api/client.ts` provides `fetchCurrentUser(): Promise<UserProfile>` that issues a `GET` request to `/api/me`.
+- [ ] `frontend/src/App.tsx` calls `fetchCurrentUser()` on mount and renders an initial greeting screen.
+- [ ] `frontend/src/App.tsx` displays a loading skeleton or spinner while user data is being fetched.
+- [ ] `frontend/src/App.tsx` displays an informative error card with a retry button if the initial API call fails.
+- [ ] On successful retrieval, `frontend/src/App.tsx` renders:
+  - Header with title "Telegram Task Tracker" and a Telegram Mini App status badge.
+  - User identifier card displaying `telegram_id` (or username if available).
+  - Timezone badge displaying the user's timezone (e.g., `Europe/Kyiv`).
+  - Theme mode indicator badge displaying current mode (`Dark` / `Light`).
+  - Connection status indicator badge ("Connected" with a green status indicator).
+- [ ] Running `npm run typecheck` (or `npx tsc --noEmit`) in `frontend/` succeeds with exit code 0 and 0 type errors.
+- [ ] Running `npm run build` in `frontend/` succeeds with exit code 0 and outputs production assets to `frontend/dist/index.html`.
+- [ ] `src/api/app.py` checks whether `frontend/dist` directory exists on disk.
+- [ ] When `frontend/dist` exists, `src/api/app.py` mounts static files and serves `index.html` at `/` with SPA fallback for non-API client routes.
+- [ ] When `frontend/dist` exists, API routes (`/api/*`) and system endpoints (`/health`, `/docs`, `/openapi.json`) continue to take precedence and are not intercepted by the static file handler.
+- [ ] When `frontend/dist` does not exist, `create_app()` initializes cleanly without throwing errors or failing to start.
+- [ ] `tests/integration/test_frontend_build.py` contains automated tests verifying static file mounting and SPA fallback behavior when `frontend/dist` exists (or using a temporary static assets fixture).
+- [ ] `tests/integration/test_frontend_build.py` verifies `GET /health` and `GET /api/me` remain accessible and unaffected by static file mounting.
+- [ ] `tests/integration/test_frontend_build.py` contains docstrings referencing requirement IDs (`REQ-TMA-01`, `REQ-API-01`).
+- [ ] Running `uv run pytest tests/integration/test_frontend_build.py` passes with exit code 0.
+- [ ] Running `uv run pytest` executes the entire test suite and passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- Mini App interactive today checklist screen, task cards, strikethrough checkboxes, and creation modal (REQ-TMA-01), moved to #12
+- Recurring task automatic rollover and generation logic (REQ-TMA-02), moved to #12
+- Timezone-aware background scheduler jobs (00:00 rollover & 09:00 push), moved to #13
+- Scheduled deadline proximity push notifications (-1h and -10m), moved to #14
+- Mini App calendar tab and monthly activity indicator endpoints (REQ-TMA-03), moved to #15
+- Mini App productivity dashboard and streak analytics (REQ-TMA-04), moved to #16
+- User settings UI for changing timezone and notification preferences (REQ-USR-02), moved to #17
+- Production Dockerfile, Docker Compose, and multi-process runner script (`main.py`), moved to #18
+
+### Constraints
+
+- Files this should stay inside:
+  - Frontend: `frontend/package.json`, `frontend/package-lock.json`, `frontend/vite.config.ts`, `frontend/tsconfig.json`, `frontend/tsconfig.node.json`, `frontend/tailwind.config.js` (or config files), `frontend/postcss.config.js`, `frontend/index.html`, `frontend/src/**`, `.gitignore`
+  - Backend integration: `src/api/app.py`, `tests/integration/test_frontend_build.py`
+- Libraries to use:
+  - Frontend: React 18 or 19 (`react`, `react-dom`), `typescript`, `vite`, `@vitejs/plugin-react`, `tailwindcss`, `postcss`, `autoprefixer`, `@telegram-apps/sdk-react` (or `@telegram-apps/sdk`), `lucide-react`
+  - Backend: `fastapi`, `starlette.staticfiles.StaticFiles`, `pytest`, `pytest-asyncio`, `fastapi.testclient.TestClient`
+- Dependencies:
+  - Python dependencies are strictly defined in `pyproject.toml` — do not add new Python dependencies without asking (`StaticFiles` is already provided by Starlette/FastAPI)
+  - All frontend dependencies must be declared in `frontend/package.json`
+- Guidelines:
+  - Strictly follow UI and theming specifications in `_docs/design-system.md` (Telegram theme CSS variables, safe-area insets, `ready()`, `expand()`)
+  - Strictly follow testing standards in `_docs/testing-guidelines.md` (zero network calls, isolated fixtures, requirement ID docstrings)
+  - Ensure `frontend/node_modules/` and `frontend/dist/` are excluded from git tracking
+  - Do not implement task checklist UI components (#12) or background scheduler jobs (#13) in this task
 
 ## 12. Mini App Interactive Today Checklist
 Goal: Implement the primary interactive checklist interface with strikethrough, tags, and recurrence.
