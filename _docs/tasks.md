@@ -657,8 +657,96 @@ Initialize the FastAPI application with CORS middleware, health check, and async
 - Do not implement task CRUD endpoints (#10) or frontend components (#11, #12) in this task
 
 ## 10. Task REST API Endpoints for Mini App
-Goal: Expose REST endpoints for retrieving, creating, updating, and toggling tasks from the Mini App.
-Description: Develop authenticated FastAPI endpoints to retrieve tasks for a given date, create new tasks, update existing task details, and toggle completion statuses. Ensure all endpoints filter and mutate records strictly for the user authenticated via `initData`. Include API integration tests verifying request validation and response payload schemas.
+
+### Goal
+
+Build and register authenticated REST API endpoints under `/api/tasks` in FastAPI for retrieving, creating, viewing, updating, toggling status, and deleting tasks for the Telegram Mini App, strictly enforcing tenant isolation and validating request payloads with comprehensive integration test coverage.
+
+### Acceptance criteria
+
+- [ ] `src/api/routes/tasks.py` defines `router = APIRouter(prefix="/api/tasks", tags=["tasks"])`.
+- [ ] `src/api/routes/tasks.py` implements `GET /api/tasks` with optional query parameter `date: date | None = Query(default=None)` (REQ-API-02).
+- [ ] If `date` query parameter is omitted or `None`, `GET /api/tasks` defaults to the user's current calendar date computed via `get_user_local_time(current_user).date()` using the authenticated user's timezone.
+- [ ] `GET /api/tasks` retrieves tasks via `get_tasks_for_date(session=session, user_id=current_user.telegram_id, target_date=target_date)`.
+- [ ] `GET /api/tasks` returns a JSON list matching `list[TaskRead]` schema with HTTP 200 OK.
+- [ ] `GET /api/tasks` returns tasks ordered strictly: uncompleted tasks (`TaskStatus.todo`) first sorted by priority (`TaskPriority.high` -> `TaskPriority.medium` -> `TaskPriority.low`), followed by completed tasks (`TaskStatus.done`), then by `created_at` ascending and `id` ascending (REQ-API-02).
+- [ ] `GET /api/tasks` returns an empty list `[]` with HTTP 200 OK when no tasks exist for the specified date.
+- [ ] `GET /api/tasks` strictly filters results by `current_user.telegram_id` and never returns tasks owned by other users (REQ-NFR-02).
+- [ ] Calling `GET /api/tasks` with an invalid date string format (e.g. `date=invalid-date`) returns HTTP 422 Unprocessable Entity.
+- [ ] `src/api/routes/tasks.py` implements `POST /api/tasks` accepting a JSON payload validated against `TaskCreate` schema (REQ-TSK-01, REQ-API-02).
+- [ ] `POST /api/tasks` creates a task via `create_task(session=session, user_id=current_user.telegram_id, data=payload)` with initial `status=TaskStatus.todo`, `reminder_sent_1h=False`, `reminder_sent_10m=False`.
+- [ ] `POST /api/tasks` returns the newly created task serialized as `TaskRead` with HTTP 201 Created (`status_code=status.HTTP_201_CREATED`, `response_model=TaskRead`).
+- [ ] Calling `POST /api/tasks` with invalid data (e.g. missing title, empty string title, or invalid date format) returns HTTP 422 Unprocessable Entity without inserting records into the database.
+- [ ] `src/api/routes/tasks.py` implements `GET /api/tasks/{task_id}` accepting path parameter `task_id: int`.
+- [ ] `GET /api/tasks/{task_id}` retrieves the task via `get_task(session=session, task_id=task_id, user_id=current_user.telegram_id)`.
+- [ ] `GET /api/tasks/{task_id}` returns the task serialized as `TaskRead` with HTTP 200 OK if found and owned by `current_user.telegram_id`.
+- [ ] Calling `GET /api/tasks/{task_id}` for a non-existent `task_id` raises `HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")`.
+- [ ] Calling `GET /api/tasks/{task_id}` for a `task_id` belonging to another user raises `HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")`, preventing cross-tenant leakage (REQ-NFR-02).
+- [ ] `src/api/routes/tasks.py` implements `PATCH /api/tasks/{task_id}` accepting path parameter `task_id: int` and JSON payload validated against `TaskUpdate` schema for partial updates (REQ-API-02).
+- [ ] `PATCH /api/tasks/{task_id}` updates fields via `update_task(session=session, task_id=task_id, user_id=current_user.telegram_id, data=payload)`.
+- [ ] `PATCH /api/tasks/{task_id}` returns the updated task serialized as `TaskRead` with HTTP 200 OK.
+- [ ] Calling `PATCH /api/tasks/{task_id}` with a new `deadline_at` resets reminder flags `reminder_sent_1h=False` and `reminder_sent_10m=False`.
+- [ ] Calling `PATCH /api/tasks/{task_id}` for a non-existent `task_id` raises `HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")`.
+- [ ] Calling `PATCH /api/tasks/{task_id}` for a `task_id` belonging to another user raises `HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")` and does not mutate the record (REQ-NFR-02).
+- [ ] Calling `PATCH /api/tasks/{task_id}` with invalid update fields (e.g. empty string title or invalid status) returns HTTP 422 Unprocessable Entity.
+- [ ] `src/api/routes/tasks.py` implements `PATCH /api/tasks/{task_id}/toggle` convenience endpoint accepting path parameter `task_id: int` for checklist toggling (REQ-TSK-02).
+- [ ] `PATCH /api/tasks/{task_id}/toggle` toggles status: if current `status == TaskStatus.done`, sets `TaskStatus.todo`; otherwise sets `TaskStatus.done` via `toggle_task_status(session=session, task_id=task_id, user_id=current_user.telegram_id, new_status=new_status)`.
+- [ ] `PATCH /api/tasks/{task_id}/toggle` returns the updated task serialized as `TaskRead` with HTTP 200 OK.
+- [ ] Calling `PATCH /api/tasks/{task_id}/toggle` for a non-existent `task_id` raises `HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")`.
+- [ ] Calling `PATCH /api/tasks/{task_id}/toggle` for a `task_id` belonging to another user raises `HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")` and does not modify the task status (REQ-TSK-02, REQ-NFR-02).
+- [ ] `src/api/routes/tasks.py` implements `DELETE /api/tasks/{task_id}` accepting path parameter `task_id: int` (REQ-API-02).
+- [ ] `DELETE /api/tasks/{task_id}` deletes the task via `delete_task(session=session, task_id=task_id, user_id=current_user.telegram_id)`.
+- [ ] `DELETE /api/tasks/{task_id}` returns HTTP 204 No Content with an empty response body when the task is successfully deleted.
+- [ ] Calling `DELETE /api/tasks/{task_id}` for a non-existent `task_id` raises `HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")`.
+- [ ] Calling `DELETE /api/tasks/{task_id}` for a `task_id` belonging to another user raises `HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")` and leaves the database record intact (REQ-NFR-02).
+- [ ] All endpoints in `src/api/routes/tasks.py` require authentication via `current_user: User = Depends(get_current_user)` and database session via `session: AsyncSession = Depends(get_db_session)`.
+- [ ] Calling any task endpoint without valid Telegram `initData` in `Authorization` header (`tma <data>` or `Bearer <data>`) or `X-Telegram-Init-Data` header returns HTTP 401 Unauthorized (REQ-API-01).
+- [ ] `src/api/routes/__init__.py` imports and exposes `tasks_router` from `src.api.routes.tasks`.
+- [ ] `src/api/app.py` includes `tasks_router` on the FastAPI application instance.
+- [ ] `src/api/__init__.py` imports and exposes `tasks_router`.
+- [ ] `tests/integration/test_api_tasks.py` contains automated integration tests executing against an isolated in-memory SQLite database using `TestClient` with valid signed `initData`.
+- [ ] Automated tests verify `GET /api/tasks` without `date` defaults to user local date in their configured timezone.
+- [ ] Automated tests verify `GET /api/tasks?date=YYYY-MM-DD` returns tasks for the specified date sorted by status (`todo` before `done`) and priority (`high` -> `medium` -> `low`) (REQ-API-02).
+- [ ] Automated tests verify `GET /api/tasks` returns `[]` when no tasks exist for the date.
+- [ ] Automated tests verify `GET /api/tasks` strictly filters by authenticated user, excluding other users' tasks (REQ-NFR-02).
+- [ ] Automated tests verify `POST /api/tasks` persists task with `status=todo`, `user_id=current_user.telegram_id`, and returns HTTP 201 Created and `TaskRead` (REQ-TSK-01, REQ-API-02).
+- [ ] Automated tests verify `POST /api/tasks` with invalid payload returns HTTP 422 Unprocessable Entity.
+- [ ] Automated tests verify `GET /api/tasks/{task_id}` returns task for owner with HTTP 200 and `TaskRead`.
+- [ ] Automated tests verify `GET /api/tasks/{task_id}` returns HTTP 404 Not Found for non-existent or other user's task ID (REQ-NFR-02).
+- [ ] Automated tests verify `PATCH /api/tasks/{task_id}` updates fields, resets reminder flags when `deadline_at` changes, and returns HTTP 200 and updated `TaskRead`.
+- [ ] Automated tests verify `PATCH /api/tasks/{task_id}` returns HTTP 404 Not Found for non-existent or other user's task ID (REQ-NFR-02).
+- [ ] Automated tests verify `PATCH /api/tasks/{task_id}/toggle` toggles status from `todo` to `done` and from `done` to `todo`, returning HTTP 200 and updated `TaskRead` (REQ-TSK-02).
+- [ ] Automated tests verify `PATCH /api/tasks/{task_id}/toggle` returns HTTP 404 Not Found for non-existent or other user's task ID (REQ-NFR-02).
+- [ ] Automated tests verify `DELETE /api/tasks/{task_id}` removes the task, returns HTTP 204 No Content, and subsequent `GET` returns HTTP 404 Not Found.
+- [ ] Automated tests verify `DELETE /api/tasks/{task_id}` returns HTTP 404 Not Found for non-existent or other user's task ID without modifying database (REQ-NFR-02).
+- [ ] Automated tests verify all task endpoints return HTTP 401 Unauthorized when authentication credentials are missing or invalid (REQ-API-01).
+- [ ] All test functions contain docstrings referencing requirement IDs (`REQ-API-02`, `REQ-TSK-01`, `REQ-TSK-02`, `REQ-NFR-02`, `REQ-API-01`).
+- [ ] Running `uv run pytest tests/integration/test_api_tasks.py` executes all task API integration tests and passes with 0 errors and 0 failures.
+- [ ] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- Telegram Mini App frontend React scaffold and Telegram SDK initialization, moved to #11
+- Mini App interactive checklist UI, task cards, and creation modal, moved to #12
+- Recurring task automatic rollover and generation logic (REQ-TMA-02), moved to #12
+- Timezone-aware background scheduler jobs (00:00 rollover & 09:00 push), moved to #13
+- Scheduled deadline proximity push notifications (-1h and -10m), moved to #14
+- Mini App calendar view and activity indicator endpoints (`GET /api/tasks/calendar-summary`), moved to #15
+- Mini App productivity dashboard and streak analytics endpoints (`GET /api/tasks/analytics`), moved to #16
+- User settings endpoints and UI (`PATCH /api/settings/timezone`), moved to #17
+- Production deployment, Docker Compose, and unified runner script (`main.py`), moved to #18
+
+### Constraints
+
+- Files this should stay inside: `src/api/routes/tasks.py`, `src/api/routes/__init__.py`, `src/api/app.py`, `src/api/__init__.py`, `tests/integration/test_api_tasks.py`
+- Libraries to use: `fastapi` (`APIRouter`, `Depends`, `HTTPException`, `status`, `Query`, `Path`), `fastapi.testclient.TestClient`, `sqlalchemy>=2.0` (`AsyncSession`), `pydantic>=2.0`, `datetime` and `zoneinfo` (Python standard library), `pytest`, `pytest-asyncio`
+- Do not add new dependencies to `pyproject.toml` without explicit permission per `Agents.md`
+- Reuse existing service functions in `src/services/task_service.py` (`create_task`, `get_task`, `get_tasks_for_date`, `update_task`, `toggle_task_status`, `delete_task`) and `src/services/user_service.py` (`get_user_local_time`) rather than writing raw database queries in route handlers
+- Use authentication dependency `src.api.auth.get_current_user` and database session dependency `src.api.deps.get_db_session`
+- Strictly enforce tenant isolation per `REQ-NFR-02` (all task access is filtered by `current_user.telegram_id`, cross-tenant access returns HTTP 404 Not Found)
+- Follow testing conventions in `_docs/testing-guidelines.md` (isolated in-memory SQLite fixture, `@pytest.mark.asyncio`, zero real network requests, REQ docstrings)
+- Follow modular architectural structure defined in `_docs/schema.md`
+- Do not implement frontend UI components or background scheduler jobs in this task
 
 ## 11. Telegram Mini App Frontend Setup
 Goal: Initialize the React Mini App with Vite, Tailwind CSS, and Telegram WebApp SDK integration.
