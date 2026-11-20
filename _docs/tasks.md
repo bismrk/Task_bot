@@ -484,8 +484,97 @@ Implement `aiogram 3` message and callback handlers for voice notes and text mes
 - Do not implement rollover dialogue (#8), API endpoints (#9, #10), Mini App UI (#11, #12), or scheduler jobs (#13, #14) in this task
 
 ## 8. Midnight Rollover Flow (00:00 "Хвости")
-Goal: Build the interactive Telegram dialogue for reviewing uncompleted tasks at midnight.
-Description: Implement a bot dialogue handler that displays a user's uncompleted tasks from the day with inline buttons allowing each task to be either closed or postponed to tomorrow. Follow the review by prompting the user to record or type tomorrow's task plan. Provide mock test scenarios demonstrating state management during the rollover review conversation.
+
+### Goal
+
+Build the interactive Telegram midnight rollover dialogue and callback handlers that detect overdue uncompleted tasks ("хвости") at 00:00 user local time, display them with per-task and batch inline action buttons to postpone (`[⏩ Перенести на сьогодні]`) or close (`[❌ Закрити]`), dynamically update message states upon resolution, prompt the user to plan the new day once all tasks are cleared, and enforce strict tenant isolation with comprehensive integration tests.
+
+### Acceptance criteria
+
+- [ ] `src/bot/keyboards/rollover.py` defines `RolloverCallback` inheriting from `aiogram.filters.callback_data.CallbackData` with prefix `"rollover"` and fields: `action: str` (values: `"postpone"`, `"close"`, `"postpone_all"`, `"close_all"`), `task_id: int | None = None`, and `user_id: int`.
+- [ ] `src/bot/keyboards/rollover.py` defines `get_task_rollover_keyboard(task_id: int, user_id: int) -> InlineKeyboardMarkup` returning inline buttons `[⏩ Перенести на сьогодні]` (action `"postpone"`) and `[❌ Закрити]` (action `"close"`) arranged with a maximum of 2 buttons per row per `_docs/design-system.md`.
+- [ ] `src/bot/keyboards/rollover.py` defines `get_batch_rollover_keyboard(user_id: int) -> InlineKeyboardMarkup` returning inline buttons `[⏩ Перенести всі]` (action `"postpone_all"`) and `[❌ Закрити всі]` (action `"close_all"`) arranged with a maximum of 2 buttons per row per `_docs/design-system.md`.
+- [ ] `src/bot/keyboards/__init__.py` imports and exposes `RolloverCallback`, `get_task_rollover_keyboard`, and `get_batch_rollover_keyboard`.
+- [ ] `src/bot/handlers/rollover.py` defines `format_overdue_task_item(task: Task) -> str` formatting an overdue task into an HTML string with semantic emojis: title, priority badge (`⚠️ Високий`, `⚡ Середній`, `💤 Низький`), category tag (`🏷️ #{tag}`), and original target date (`📅 {task.target_date}`) per `_docs/design-system.md`.
+- [ ] `src/bot/handlers/rollover.py` defines async function `send_midnight_rollover_dialogue(bot: Bot, session: AsyncSession, user: User, reference_date: date | None = None) -> list[Message]` to trigger the rollover review dialogue (REQ-SCH-01).
+- [ ] `send_midnight_rollover_dialogue` computes the user's local date `local_today`: uses `reference_date` if provided; otherwise resolves local date via `get_user_local_time(user).date()`.
+- [ ] `send_midnight_rollover_dialogue` queries uncompleted overdue tasks using `get_overdue_tasks(session, user_id=user.telegram_id, before_date=local_today)` (REQ-SCH-01, REQ-NFR-02).
+- [ ] When no overdue tasks exist (`overdue_tasks == []`), `send_midnight_rollover_dialogue` sends a single congratulatory message to `chat_id=user.telegram_id`: `✨ <b>Всі вчорашні завдання виконано!</b> Чудова робота.\n\nНадиктуйте або напишіть план на сьогодні 🚀` with no inline keyboard, and returns `[sent_message]` (REQ-SCH-01).
+- [ ] When overdue tasks exist, `send_midnight_rollover_dialogue`:
+  - Sends an overview batch control message with text `📋 <b>Невиконані завдання за вчора ("хвости"):</b>\nУ вас залишилося {count} невиконаних завдань.` attached with `get_batch_rollover_keyboard(user_id=user.telegram_id)`.
+  - Sends each overdue task as an individual message formatted via `format_overdue_task_item(task)` attached with `get_task_rollover_keyboard(task_id=task.id, user_id=user.telegram_id)`.
+  - Returns the list of all sent `Message` objects in the order sent.
+- [ ] `src/bot/handlers/rollover.py` defines `router = Router(name="rollover")` (or `rollover_router`).
+- [ ] `src/bot/handlers/rollover.py` defines async callback handler `handle_rollover_callback(callback_query: CallbackQuery, callback_data: RolloverCallback, bot: Bot, session: AsyncSession) -> None` decorated with `@router.callback_query(RolloverCallback.filter())`.
+- [ ] If `callback_query.from_user` is `None` or `callback_query.message` is not an instance of `Message`, `handle_rollover_callback` returns immediately without errors or database modifications.
+- [ ] Tenant Security Check: If `callback_query.from_user.id != callback_data.user_id`, the callback is rejected immediately with alert `await callback_query.answer("⚠️ Ви не можете керувати завданнями іншого користувача.", show_alert=True)` without altering database or message state (REQ-NFR-02).
+- [ ] Single Task Postpone Callback (`action == "postpone"`):
+  - Resolves `local_today` from user timezone.
+  - If `callback_data.task_id` is missing or the task cannot be found in database, alerts user via `await callback_query.answer("⚠️ Завдання вже опрацьовано або не знайдено.", show_alert=True)` and removes the keyboard from message.
+  - Postpones task via `rollover_task(session, task_id=callback_data.task_id, user_id=callback_query.from_user.id, new_date=local_today)` updating `target_date` to today (REQ-SCH-01, REQ-TSK-01).
+  - Dynamically edits `callback_query.message` to confirmation text (e.g. `⏩ Завдання «{task.title}» перенесено на сьогодні!`) and removes inline keyboard (`reply_markup=None`).
+  - Answers callback via `await callback_query.answer("Перенесено на сьогодні!")`.
+  - Checks remaining overdue tasks via `get_overdue_tasks(session, user_id=callback_query.from_user.id, before_date=local_today)`; if no overdue tasks remain (`len == 0`), automatically sends follow-up prompt: `await bot.send_message(chat_id=callback_query.from_user.id, text="✨ Всі хвости розібрано! Надиктуйте або напишіть план на сьогодні 🚀")`.
+- [ ] Single Task Close Callback (`action == "close"`):
+  - Resolves `local_today` from user timezone.
+  - If `callback_data.task_id` is missing or the task cannot be found in database, alerts user via `await callback_query.answer("⚠️ Завдання вже опрацьовано або не знайдено.", show_alert=True)` and removes the keyboard from message.
+  - Cancels task via `toggle_task_status(session, task_id=callback_data.task_id, user_id=callback_query.from_user.id, new_status=TaskStatus.canceled)` (REQ-SCH-01, REQ-TSK-02).
+  - Dynamically edits `callback_query.message` to confirmation text (e.g. `❌ Завдання «{task.title}» закрито.`) and removes inline keyboard (`reply_markup=None`).
+  - Answers callback via `await callback_query.answer("Завдання закрито!")`.
+  - Checks remaining overdue tasks via `get_overdue_tasks(session, user_id=callback_query.from_user.id, before_date=local_today)`; if no overdue tasks remain (`len == 0`), automatically sends follow-up prompt: `await bot.send_message(chat_id=callback_query.from_user.id, text="✨ Всі хвости розібрано! Надиктуйте або напишіть план на сьогодні 🚀")`.
+- [ ] Batch Postpone Callback (`action == "postpone_all"`):
+  - Resolves `local_today` from user timezone.
+  - Retrieves remaining overdue tasks via `get_overdue_tasks(session, user_id=callback_query.from_user.id, before_date=local_today)`.
+  - If no overdue tasks remain, edits message to `✨ Всі хвости вже опрацьовано!`, removes keyboard, and answers callback.
+  - If overdue tasks exist, calls `batch_rollover_tasks(session, task_ids=[t.id for t in overdue_tasks], user_id=callback_query.from_user.id, new_date=local_today)` to postpone all overdue tasks to today (REQ-SCH-01).
+  - Dynamically edits message to `⏩ Всі завдання ({count}) перенесено на сьогодні!` and removes inline keyboard (`reply_markup=None`).
+  - Answers callback via `await callback_query.answer("Всі завдання перенесено!")`.
+  - Automatically sends follow-up prompt: `await bot.send_message(chat_id=callback_query.from_user.id, text="✨ Всі хвости розібрано! Надиктуйте або напишіть план на сьогодні 🚀")`.
+- [ ] Batch Close Callback (`action == "close_all"`):
+  - Resolves `local_today` from user timezone.
+  - Retrieves remaining overdue tasks via `get_overdue_tasks(session, user_id=callback_query.from_user.id, before_date=local_today)`.
+  - If no overdue tasks remain, edits message to `✨ Всі хвости вже опрацьовано!`, removes keyboard, and answers callback.
+  - If overdue tasks exist, updates status of all remaining overdue tasks to `TaskStatus.canceled` and commits the session (REQ-SCH-01, REQ-TSK-02).
+  - Dynamically edits message to `❌ Всі завдання ({count}) закрито.` and removes inline keyboard (`reply_markup=None`).
+  - Answers callback via `await callback_query.answer("Всі завдання закрито!")`.
+  - Automatically sends follow-up prompt: `await bot.send_message(chat_id=callback_query.from_user.id, text="✨ Всі хвости розібрано! Надиктуйте або напишіть план на сьогодні 🚀")`.
+- [ ] `src/bot/handlers/__init__.py` imports and exposes `rollover_router`.
+- [ ] `src/bot/dispatcher.py` updates `create_dispatcher` to include `rollover_router` alongside `start_router`, `voice_text_router`, and `callbacks_router`.
+- [ ] `tests/integration/test_rollover_handlers.py` contains automated integration tests verifying `send_midnight_rollover_dialogue` when user has zero overdue tasks sends single congratulatory message and returns `list[Message]` of length 1 (REQ-SCH-01).
+- [ ] `tests/integration/test_rollover_handlers.py` contains automated integration tests verifying `send_midnight_rollover_dialogue` when user has multiple overdue tasks sends overview batch message and per-task messages with inline keyboards (REQ-SCH-01).
+- [ ] `tests/integration/test_rollover_handlers.py` contains automated integration tests verifying `send_midnight_rollover_dialogue` respects `reference_date` parameter for deterministic testing.
+- [ ] `tests/integration/test_rollover_handlers.py` contains automated integration tests verifying single task postpone callback (`action == "postpone"`): task `target_date` is updated to today in DB, message text is edited, keyboard is removed, callback is answered, and follow-up prompt is sent only if no overdue tasks remain (REQ-SCH-01, REQ-TSK-01).
+- [ ] `tests/integration/test_rollover_handlers.py` contains automated integration tests verifying single task close callback (`action == "close"`): task status is updated to `TaskStatus.canceled` in DB, message text is edited, keyboard is removed, callback is answered, and follow-up prompt is sent only if no overdue tasks remain (REQ-SCH-01, REQ-TSK-02).
+- [ ] `tests/integration/test_rollover_handlers.py` contains automated integration tests verifying batch postpone callback (`action == "postpone_all"`): all overdue tasks have `target_date` updated to today in DB, overview message is edited without keyboard, callback is answered, and follow-up prompt is sent (REQ-SCH-01).
+- [ ] `tests/integration/test_rollover_handlers.py` contains automated integration tests verifying batch close callback (`action == "close_all"`): all overdue tasks have status updated to `TaskStatus.canceled` in DB, overview message is edited without keyboard, callback is answered, and follow-up prompt is sent (REQ-SCH-01, REQ-TSK-02).
+- [ ] `tests/integration/test_rollover_handlers.py` contains automated integration tests verifying tenant security enforcement: callback query from unauthorized user (`from_user.id != callback_data.user_id`) triggers `answer(show_alert=True)` with error message and leaves DB and messages untouched (REQ-NFR-02).
+- [ ] `tests/integration/test_rollover_handlers.py` contains automated integration tests verifying handling of already-resolved or non-existent tasks: displays alert without raising unhandled exceptions.
+- [ ] All integration tests in `tests/integration/test_rollover_handlers.py` mock 100% of Telegram API calls (`bot.send_message`, `callback_query.answer`, `message.edit_text`, `message.edit_reply_markup`) using `unittest.mock.AsyncMock` with zero real network requests per `_docs/testing-guidelines.md`.
+- [ ] All test functions contain docstrings referencing requirement IDs (`REQ-SCH-01`, `REQ-TSK-01`, `REQ-TSK-02`, `REQ-NFR-02`).
+- [ ] Running `uv run pytest tests/integration/test_rollover_handlers.py` executes all rollover tests and passes with 0 errors and 0 failures.
+- [ ] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- APScheduler timezone-aware background jobs and minute-by-minute 00:00 trigger scheduler, moved to #13
+- Scheduled deadline proximity push notifications (-1h and -10m), moved to #14
+- Morning push digest (09:00) with Mini App launch button, moved to #13
+- FastAPI backend initialization and Telegram WebApp initData authentication, moved to #9
+- Mini App REST API endpoints for tasks (`/api/tasks`), moved to #10
+- Frontend React Mini App checklist and task creation UI, moved to #11, #12
+- Recurring task automatic generation logic across days (REQ-TMA-02), moved to #12
+- User `/settings` command handler and timezone configuration UI, moved to #17
+
+### Constraints
+
+- Files this should stay inside: `src/bot/keyboards/rollover.py`, `src/bot/keyboards/__init__.py`, `src/bot/handlers/rollover.py`, `src/bot/handlers/__init__.py`, `src/bot/dispatcher.py`, `tests/integration/test_rollover_handlers.py`
+- Libraries to use: `aiogram>=3.0` (`Bot`, `Dispatcher`, `Router`, `F`, `Message`, `CallbackQuery`, `InlineKeyboardMarkup`, `InlineKeyboardButton`, `CallbackData`), `sqlalchemy>=2.0` (`AsyncSession`, `select`), `datetime` and `zoneinfo` (Python standard library), `pytest`, `pytest-asyncio`, `unittest.mock` (`AsyncMock`, `MagicMock`)
+- Do not add new dependencies to `pyproject.toml` without explicit permission per `Agents.md`
+- Never make real network requests to Telegram in automated tests per `_docs/testing-guidelines.md`
+- Follow Telegram bot formatting and UI guidelines in `_docs/design-system.md` (clean semantic emojis, HTML parse mode, max 2 buttons per row, `[⏩ Перенести на сьогодні]`, `[❌ Закрити]`, `[⏩ Перенести всі]`, `[❌ Закрити всі]`)
+- Strict tenant isolation filtering by `user_id` per `REQ-NFR-02`
+- Follow modular architectural structure defined in `_docs/schema.md`
+- Do not implement background scheduler jobs (#13), API endpoints (#9, #10), or Mini App UI (#11, #12) in this task
 
 ## 9. FastAPI Backend Initialization and Telegram initData Auth
 Goal: Set up the FastAPI server with middleware and secure Telegram Mini App authentication.
