@@ -1,8 +1,11 @@
 """Pydantic schemas package."""
 
 from src.schemas.task import (
+    AnalyticsResponse,
     CalendarDaySummary,
+    DailyTrendItem,
     ExtractedTask,
+    TagBreakdownItem,
     TaskCreate,
     TaskExtractionResult,
     TaskRead,
@@ -21,4 +24,7 @@ __all__ = [
     "TaskUpdate",
     "TaskRead",
     "CalendarDaySummary",
+    "DailyTrendItem",
+    "TagBreakdownItem",
+    "AnalyticsResponse",
 ]

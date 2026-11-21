@@ -302,3 +302,40 @@ class CalendarDaySummary(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
+class DailyTrendItem(BaseModel):
+    """Daily productivity aggregation item for charts and trend tracking."""
+
+    date: date
+    completed_tasks: int = Field(default=0, ge=0)
+    total_tasks: int = Field(default=0, ge=0)
+    completion_rate: float = Field(default=0.0, ge=0.0, le=100.0)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TagBreakdownItem(BaseModel):
+    """Category tag aggregation breakdown item."""
+
+    tag: str
+    count: int = Field(default=0, ge=0)
+    completed_count: int = Field(default=0, ge=0)
+    percentage: float = Field(default=0.0, ge=0.0, le=100.0)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AnalyticsResponse(BaseModel):
+    """Productivity analytics dashboard response."""
+
+    streak_current: int = Field(default=0, ge=0)
+    streak_longest: int = Field(default=0, ge=0)
+    total_tasks: int = Field(default=0, ge=0)
+    completed_tasks: int = Field(default=0, ge=0)
+    completion_rate: float = Field(default=0.0, ge=0.0, le=100.0)
+    daily_trends: list[DailyTrendItem] = Field(default_factory=list)
+    tag_breakdown: list[TagBreakdownItem] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+

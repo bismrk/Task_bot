@@ -75,3 +75,37 @@ export interface CalendarDaySummary {
  */
 export type AppTab = 'today' | 'calendar' | 'analytics' | 'settings';
 
+/**
+ * Daily productivity aggregation item for charts and trend tracking.
+ */
+export interface DailyTrendItem {
+  date: string;
+  completed_tasks: number;
+  total_tasks: number;
+  completion_rate: number;
+}
+
+/**
+ * Category tag aggregation breakdown item.
+ */
+export interface TagBreakdownItem {
+  tag: string;
+  count: number;
+  completed_count: number;
+  percentage: number;
+}
+
+/**
+ * Productivity analytics dashboard response matching backend AnalyticsResponse schema.
+ */
+export interface AnalyticsResponse {
+  streak_current: number;
+  streak_longest: number;
+  total_tasks: number;
+  completed_tasks: number;
+  completion_rate: number;
+  daily_trends: DailyTrendItem[];
+  tag_breakdown: TagBreakdownItem[];
+}
+
+

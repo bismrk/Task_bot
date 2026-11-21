@@ -1258,13 +1258,13 @@ Develop and integrate an interactive Productivity Analytics Dashboard and daily 
 
 ### Acceptance criteria
 
-- [ ] `src/schemas/task.py` defines `DailyTrendItem(BaseModel)` with fields: `date: date`, `completed_tasks: int = Field(default=0, ge=0)`, `total_tasks: int = Field(default=0, ge=0)`, `completion_rate: float = Field(default=0.0, ge=0.0, le=100.0)`, and `model_config = ConfigDict(from_attributes=True)`.
-- [ ] `src/schemas/task.py` defines `TagBreakdownItem(BaseModel)` with fields: `tag: str`, `count: int = Field(default=0, ge=0)`, `completed_count: int = Field(default=0, ge=0)`, `percentage: float = Field(default=0.0, ge=0.0, le=100.0)`, and `model_config = ConfigDict(from_attributes=True)`.
-- [ ] `src/schemas/task.py` defines `AnalyticsResponse(BaseModel)` with fields: `streak_current: int = Field(default=0, ge=0)`, `streak_longest: int = Field(default=0, ge=0)`, `total_tasks: int = Field(default=0, ge=0)`, `completed_tasks: int = Field(default=0, ge=0)`, `completion_rate: float = Field(default=0.0, ge=0.0, le=100.0)`, `daily_trends: list[DailyTrendItem] = Field(default_factory=list)`, `tag_breakdown: list[TagBreakdownItem] = Field(default_factory=list)`, and `model_config = ConfigDict(from_attributes=True)`.
-- [ ] `src/schemas/__init__.py` imports and exposes `DailyTrendItem`, `TagBreakdownItem`, and `AnalyticsResponse`.
-- [ ] `src/services/task_service.py` defines async `get_productivity_analytics(session: AsyncSession, user_id: int, days: int = 14, reference_date: date | None = None) -> AnalyticsResponse` (REQ-TMA-04, REQ-NFR-02).
-- [ ] `get_productivity_analytics` determines reference `today`: uses `reference_date` if provided; otherwise resolves current date from the user's configured timezone via `get_user_local_time(user).date()` (falling back to `date.today()`).
-- [ ] Streak calculation logic:
+- [x] `src/schemas/task.py` defines `DailyTrendItem(BaseModel)` with fields: `date: date`, `completed_tasks: int = Field(default=0, ge=0)`, `total_tasks: int = Field(default=0, ge=0)`, `completion_rate: float = Field(default=0.0, ge=0.0, le=100.0)`, and `model_config = ConfigDict(from_attributes=True)`.
+- [x] `src/schemas/task.py` defines `TagBreakdownItem(BaseModel)` with fields: `tag: str`, `count: int = Field(default=0, ge=0)`, `completed_count: int = Field(default=0, ge=0)`, `percentage: float = Field(default=0.0, ge=0.0, le=100.0)`, and `model_config = ConfigDict(from_attributes=True)`.
+- [x] `src/schemas/task.py` defines `AnalyticsResponse(BaseModel)` with fields: `streak_current: int = Field(default=0, ge=0)`, `streak_longest: int = Field(default=0, ge=0)`, `total_tasks: int = Field(default=0, ge=0)`, `completed_tasks: int = Field(default=0, ge=0)`, `completion_rate: float = Field(default=0.0, ge=0.0, le=100.0)`, `daily_trends: list[DailyTrendItem] = Field(default_factory=list)`, `tag_breakdown: list[TagBreakdownItem] = Field(default_factory=list)`, and `model_config = ConfigDict(from_attributes=True)`.
+- [x] `src/schemas/__init__.py` imports and exposes `DailyTrendItem`, `TagBreakdownItem`, and `AnalyticsResponse`.
+- [x] `src/services/task_service.py` defines async `get_productivity_analytics(session: AsyncSession, user_id: int, days: int = 14, reference_date: date | None = None) -> AnalyticsResponse` (REQ-TMA-04, REQ-NFR-02).
+- [x] `get_productivity_analytics` determines reference `today`: uses `reference_date` if provided; otherwise resolves current date from the user's configured timezone via `get_user_local_time(user).date()` (falling back to `date.today()`).
+- [x] Streak calculation logic:
   - Considers a day completed if the user has >= 1 task with `status == TaskStatus.done` on that calendar date (`target_date`).
   - Active streak evaluation:
     - If user has completed tasks on `today`, current streak includes `today` and counts backward consecutive preceding calendar days with >= 1 completed task.
@@ -1273,93 +1273,93 @@ Develop and integrate an interactive Productivity Analytics Dashboard and daily 
   - Longest streak evaluation:
     - Analyzes the user's entire task completion history to compute `streak_longest` (maximum consecutive calendar days with >= 1 completed task).
   - Edge case: new users or users with 0 completed tasks return `streak_current = 0` and `streak_longest = 0`.
-- [ ] Daily trends logic:
+- [x] Daily trends logic:
   - Generates a continuous sequence of `days` calendar dates ending on `today` (from `today - timedelta(days=days - 1)` to `today` inclusive).
   - Queries non-canceled tasks (`status != TaskStatus.canceled`) for `user_id` within the date window.
   - Aggregates `total_tasks` and `completed_tasks` (`status == TaskStatus.done`) per date.
   - Calculates `completion_rate = round((completed_tasks / total_tasks) * 100.0, 1)` if `total_tasks > 0`, else `0.0`.
   - Every date in the requested range is present in `daily_trends` ordered by `date ASC`. Days with 0 tasks output `total_tasks = 0`, `completed_tasks = 0`, `completion_rate = 0.0`.
-- [ ] Tag breakdown logic:
+- [x] Tag breakdown logic:
   - Aggregates non-canceled tasks (`status != TaskStatus.canceled`) within the date window grouped by `tag`.
   - For tasks where `tag is None` or empty, groups them under label `"Без тегу"`.
   - Calculates for each tag: `count` (total non-canceled tasks with this tag), `completed_count` (tasks with `status == TaskStatus.done`), and `percentage = round((count / window_total_tasks) * 100.0, 1)` where `window_total_tasks` is total non-canceled tasks in the window (or `0.0` if 0).
   - Orders tag breakdown items by `count DESC`, then `tag ASC`.
-- [ ] Window summary metrics:
+- [x] Window summary metrics:
   - Computes `total_tasks` as total non-canceled tasks in the window.
   - Computes `completed_tasks` as count of tasks with `status == TaskStatus.done` in the window.
   - Computes `completion_rate = round((completed_tasks / total_tasks) * 100.0, 1)` if `total_tasks > 0`, else `0.0`.
-- [ ] Strictly enforces tenant isolation by filtering all queries by `Task.user_id == user_id`, guaranteeing tasks of other users are never included in streaks, trends, or tag breakdowns (REQ-NFR-02).
-- [ ] `src/services/__init__.py` imports and exposes `get_productivity_analytics`.
-- [ ] `src/api/routes/tasks.py` implements `GET /api/tasks/analytics` endpoint returning `AnalyticsResponse` (REQ-TMA-04).
-- [ ] Accepts optional query parameter `days: int = Query(default=14, ge=7, le=90)` specifying the time window for trends and breakdowns.
-- [ ] Enforces Telegram authentication via `current_user: User = Depends(get_current_user)` and database session via `session: AsyncSession = Depends(get_db_session)` (REQ-API-01).
-- [ ] Positioned before `GET /api/tasks/{task_id}` to avoid routing collisions in FastAPI.
-- [ ] Returns HTTP 200 OK with JSON matching `AnalyticsResponse` schema.
-- [ ] Calling endpoint without valid Telegram `initData` or with invalid HMAC-SHA256 signature returns HTTP 401 Unauthorized (REQ-API-01).
-- [ ] Calling endpoint with `days < 7` or `days > 90` (e.g. `days=6` or `days=91`) returns HTTP 422 Unprocessable Entity.
-- [ ] `frontend/src/api/types.ts` defines `DailyTrendItem` interface: `date: string; completed_tasks: number; total_tasks: number; completion_rate: number;`.
-- [ ] `frontend/src/api/types.ts` defines `TagBreakdownItem` interface: `tag: string; count: number; completed_count: number; percentage: number;`.
-- [ ] `frontend/src/api/types.ts` defines `AnalyticsResponse` interface matching backend schema: `streak_current: number; streak_longest: number; total_tasks: number; completed_tasks: number; completion_rate: number; daily_trends: DailyTrendItem[]; tag_breakdown: TagBreakdownItem[];`.
-- [ ] `frontend/src/api/client.ts` implements and exports `fetchAnalytics(days?: number): Promise<AnalyticsResponse>` calling `GET /api/tasks/analytics` with optional `?days=${days}` and Telegram `Authorization: tma <initData>` header (REQ-API-01, REQ-TMA-04).
-- [ ] `frontend/src/components/NavigationTabBar.tsx` enables "Аналітика" tab by removing `disabled: true` from the `analytics` tab configuration.
-- [ ] Tapping "Аналітика" tab switches active tab to `'analytics'` and triggers Telegram haptic feedback `impactOccurred('light')` when available.
-- [ ] `frontend/src/components/AnalyticsView.tsx` component is created and implements the full analytics dashboard view (REQ-TMA-04).
-- [ ] Time Window Selector:
+- [x] Strictly enforces tenant isolation by filtering all queries by `Task.user_id == user_id`, guaranteeing tasks of other users are never included in streaks, trends, or tag breakdowns (REQ-NFR-02).
+- [x] `src/services/__init__.py` imports and exposes `get_productivity_analytics`.
+- [x] `src/api/routes/tasks.py` implements `GET /api/tasks/analytics` endpoint returning `AnalyticsResponse` (REQ-TMA-04).
+- [x] Accepts optional query parameter `days: int = Query(default=14, ge=7, le=90)` specifying the time window for trends and breakdowns.
+- [x] Enforces Telegram authentication via `current_user: User = Depends(get_current_user)` and database session via `session: AsyncSession = Depends(get_db_session)` (REQ-API-01).
+- [x] Positioned before `GET /api/tasks/{task_id}` to avoid routing collisions in FastAPI.
+- [x] Returns HTTP 200 OK with JSON matching `AnalyticsResponse` schema.
+- [x] Calling endpoint without valid Telegram `initData` or with invalid HMAC-SHA256 signature returns HTTP 401 Unauthorized (REQ-API-01).
+- [x] Calling endpoint with `days < 7` or `days > 90` (e.g. `days=6` or `days=91`) returns HTTP 422 Unprocessable Entity.
+- [x] `frontend/src/api/types.ts` defines `DailyTrendItem` interface: `date: string; completed_tasks: number; total_tasks: number; completion_rate: number;`.
+- [x] `frontend/src/api/types.ts` defines `TagBreakdownItem` interface: `tag: string; count: number; completed_count: number; percentage: number;`.
+- [x] `frontend/src/api/types.ts` defines `AnalyticsResponse` interface matching backend schema: `streak_current: number; streak_longest: number; total_tasks: number; completed_tasks: number; completion_rate: number; daily_trends: DailyTrendItem[]; tag_breakdown: TagBreakdownItem[];`.
+- [x] `frontend/src/api/client.ts` implements and exports `fetchAnalytics(days?: number): Promise<AnalyticsResponse>` calling `GET /api/tasks/analytics` with optional `?days=${days}` and Telegram `Authorization: tma <initData>` header (REQ-API-01, REQ-TMA-04).
+- [x] `frontend/src/components/NavigationTabBar.tsx` enables "Аналітика" tab by removing `disabled: true` from the `analytics` tab configuration.
+- [x] Tapping "Аналітика" tab switches active tab to `'analytics'` and triggers Telegram haptic feedback `impactOccurred('light')` when available.
+- [x] `frontend/src/components/AnalyticsView.tsx` component is created and implements the full analytics dashboard view (REQ-TMA-04).
+- [x] Time Window Selector:
   - Renders pill buttons to switch between ranges (e.g. `7 днів`, `14 днів`, `30 днів`), defaulting to 14 days.
   - Selecting a range fetches analytics for the chosen period and triggers Telegram haptic feedback `impactOccurred('light')`.
-- [ ] Daily Streak Card:
+- [x] Daily Streak Card:
   - Prominent flame icon (`🔥`), bold number (`streak_current`), and celebratory/motivational micro-copy per `_docs/design-system.md`:
     - "Днів поспіль!", "Продовжуйте в тому ж дусі!" when streak is active with tasks completed today.
     - "Стрік тримається! Виконайте завдання сьогодні 🔥" when yesterday was completed but today is pending.
     - "Почніть свій перший стрік сьогодні!" when streak is 0.
   - Best streak badge displaying all-time record: `🏆 Рекорд: {streak_longest} днів`.
-- [ ] Metric Cards Grid:
+- [x] Metric Cards Grid:
   - Renders summary cards with theme-aware styling and semantic icons:
     - Total Tasks card (`Всього завдань`, `total_tasks`).
     - Completed Tasks card (`Виконано`, `completed_tasks`).
     - Completion Rate card (`Успішність`, `{completion_rate}%`) with progress indicator.
-- [ ] Productivity Trend Chart (`Recharts`):
+- [x] Productivity Trend Chart (`Recharts`):
   - Renders daily productivity trends using `Recharts` (`ResponsiveContainer`, `BarChart` or `AreaChart`, `XAxis`, `YAxis`, `Tooltip`, `Bar` or `Area`).
   - Colors and styling adhere to `_docs/design-system.md`:
     - Palette adapts dynamically to Telegram theme variables (`--tg-theme-button-color`, `--tg-theme-secondary-bg-color`, `--tg-theme-text-color`, `--tg-theme-hint-color`).
     - Tooltip background and borders match Telegram secondary background (`--tg-theme-secondary-bg-color`).
     - X-axis formats dates as readable short strings (e.g. `19.11`).
-- [ ] Tag Breakdown Section:
+- [x] Tag Breakdown Section:
   - Renders distribution of tasks by category/tag with tag names (`#{tag}`), task counts, completed counts, and percentage progress bars.
   - Tasks without a tag are displayed with neutral chip styling labeled `"Без тегу"`.
-- [ ] Empty State & Edge Cases:
+- [x] Empty State & Edge Cases:
   - When user has 0 tasks across the window, renders an empty state card with an icon, encouraging copy ("Ще немає даних для аналітики"), and a prompt to add tasks.
-- [ ] Loading & Error States:
+- [x] Loading & Error States:
   - Displays a skeleton loader or spinner while analytics data is being fetched.
   - Displays an error alert banner with a `Спробувати знову` retry button if the API request fails.
-- [ ] `frontend/src/App.tsx` conditionally renders `AnalyticsView` when `activeTab === 'analytics'`.
-- [ ] Running `npm run typecheck` (or `npx tsc --noEmit`) in `frontend/` succeeds with exit code 0 and 0 errors.
-- [ ] Running `npm run build` in `frontend/` succeeds with exit code 0 and updates production static assets in `frontend/dist/`.
-- [ ] `tests/integration/test_api_analytics.py` contains automated integration tests executing against an isolated in-memory SQLite database using `TestClient` with valid signed `initData`.
-- [ ] Automated tests verify streak calculation logic:
+- [x] `frontend/src/App.tsx` conditionally renders `AnalyticsView` when `activeTab === 'analytics'`.
+- [x] Running `npm run typecheck` (or `npx tsc --noEmit`) in `frontend/` succeeds with exit code 0 and 0 errors.
+- [x] Running `npm run build` in `frontend/` succeeds with exit code 0 and updates production static assets in `frontend/dist/`.
+- [x] `tests/integration/test_api_analytics.py` contains automated integration tests executing against an isolated in-memory SQLite database using `TestClient` with valid signed `initData`.
+- [x] Automated tests verify streak calculation logic:
   - Consecutive days ending today: user completed tasks today, yesterday, and 2 days ago -> asserts `streak_current == 3`.
   - Consecutive days ending yesterday: user completed tasks yesterday and 2 days ago, but 0 tasks today -> asserts `streak_current == 2` (grace period).
   - Broken streak: user completed tasks 2 days ago, but 0 tasks yesterday and 0 today -> asserts `streak_current == 0`.
   - Longest streak: user had a 5-day streak last week, took a 2-day gap, and now has a 2-day streak -> asserts `streak_current == 2` and `streak_longest == 5`.
   - New user with 0 completed tasks -> asserts `streak_current == 0` and `streak_longest == 0`.
-- [ ] Automated tests verify daily trend generation:
+- [x] Automated tests verify daily trend generation:
   - Continuous sequence: asserts `len(daily_trends) == days` and dates are sequential with no missing days.
   - Zero-task days: asserts `total_tasks == 0`, `completed_tasks == 0`, `completion_rate == 0.0`.
   - Partial & full completion days: asserts accurate `total_tasks`, `completed_tasks`, and `completion_rate`.
-- [ ] Automated tests verify tag breakdown:
+- [x] Automated tests verify tag breakdown:
   - Correct aggregation of non-canceled tasks by tag, task counts, completed counts, and percentages.
   - Tasks with `tag is None` grouped under `"Без тегу"`.
   - Canceled tasks excluded from breakdown.
-- [ ] Automated tests verify time window parameter:
+- [x] Automated tests verify time window parameter:
   - Queries with `days=7`, `days=14`, `days=30` return expected date ranges.
   - Invalid parameters: `days=6`, `days=91`, or non-integer `days` return HTTP 422 Unprocessable Entity.
-- [ ] Automated tests verify tenant isolation:
+- [x] Automated tests verify tenant isolation:
   - Tasks belonging to User B are completely excluded from User A's analytics metrics, streaks, daily trends, and tag breakdowns (REQ-NFR-02).
-- [ ] Automated tests verify authentication:
+- [x] Automated tests verify authentication:
   - Requests without `Authorization` header or with invalid signature return HTTP 401 Unauthorized (REQ-API-01).
-- [ ] All test functions contain docstrings referencing requirement IDs (`REQ-TMA-04`, `REQ-API-01`, `REQ-NFR-02`).
-- [ ] Running `uv run pytest tests/integration/test_api_analytics.py` passes with exit code 0.
-- [ ] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
+- [x] All test functions contain docstrings referencing requirement IDs (`REQ-TMA-04`, `REQ-API-01`, `REQ-NFR-02`).
+- [x] Running `uv run pytest tests/integration/test_api_analytics.py` passes with exit code 0.
+- [x] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
 
 ### Out of scope
 

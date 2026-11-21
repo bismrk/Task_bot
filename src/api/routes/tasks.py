@@ -9,12 +9,19 @@ from src.api.auth import get_current_user
 from src.api.deps import get_db_session
 from src.models.task import TaskStatus
 from src.models.user import User
-from src.schemas.task import CalendarDaySummary, TaskCreate, TaskRead, TaskUpdate
+from src.schemas.task import (
+    AnalyticsResponse,
+    CalendarDaySummary,
+    TaskCreate,
+    TaskRead,
+    TaskUpdate,
+)
 from src.services.task_service import (
     create_task,
     delete_task,
     ensure_recurring_tasks_for_date,
     get_calendar_summary,
+    get_productivity_analytics,
     get_task,
     get_tasks_for_date,
     toggle_task_status,
@@ -77,6 +84,20 @@ async def get_monthly_calendar_summary(
     )
     return summaries
 
+
+@router.get("/analytics", response_model=AnalyticsResponse)
+async def get_analytics(
+    days: int = Query(default=14, ge=7, le=90),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> AnalyticsResponse:
+    """Retrieve productivity analytics, streaks, and trends for the user."""
+    analytics = await get_productivity_analytics(
+        session=session,
+        user_id=current_user.telegram_id,
+        days=days,
+    )
+    return analytics
 
 
 @router.get("/{task_id}", response_model=TaskRead)

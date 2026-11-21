@@ -3,6 +3,7 @@ import { fetchCurrentUser, fetchTasks } from './api/client';
 import type { AppTab, TaskRead, UserProfile } from './api/types';
 import { TodayChecklist } from './components/TodayChecklist';
 import { CalendarView } from './components/CalendarView';
+import { AnalyticsView } from './components/AnalyticsView';
 import { NavigationTabBar } from './components/NavigationTabBar';
 import {
   User,
@@ -163,6 +164,9 @@ export default function App() {
 
             {/* Calendar View */}
             {activeTab === 'calendar' && <CalendarView />}
+
+            {/* Analytics View */}
+            {activeTab === 'analytics' && <AnalyticsView />}
           </div>
         )}
       </main>

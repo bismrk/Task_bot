@@ -1,14 +1,23 @@
 """Task management CRUD service and task rollover operations."""
 
 import calendar
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import re
 
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.task import Task, TaskPriority, TaskStatus
-from src.schemas.task import CalendarDaySummary, ExtractedTask, TaskCreate, TaskUpdate
+from src.schemas.task import (
+    AnalyticsResponse,
+    CalendarDaySummary,
+    DailyTrendItem,
+    ExtractedTask,
+    TagBreakdownItem,
+    TaskCreate,
+    TaskUpdate,
+)
+from src.services.user_service import get_user, get_user_local_time
 
 
 async def create_task(
@@ -519,5 +528,176 @@ async def get_calendar_summary(
         )
 
     return summaries
+
+
+async def get_productivity_analytics(
+    session: AsyncSession,
+    user_id: int,
+    days: int = 14,
+    reference_date: date | None = None,
+) -> AnalyticsResponse:
+    """Compute productivity analytics, streaks, trends, and tag distribution for a user.
+
+    Args:
+        session: Active SQLAlchemy async session.
+        user_id: Telegram user ID for tenant isolation.
+        days: Time window length in days (default 14, between 7 and 90).
+        reference_date: Optional explicit anchor date; defaults to user's local date.
+
+    Returns:
+        AnalyticsResponse containing streak info, daily trends, tag breakdown, and summary metrics.
+    """
+    if reference_date is not None:
+        today = reference_date
+    else:
+        user = await get_user(session, user_id)
+        if user is not None:
+            today = get_user_local_time(user).date()
+        else:
+            today = date.today()
+
+    # 1. Streaks calculation across all-time history for this user
+    completed_dates_stmt = (
+        select(Task.target_date)
+        .where(
+            Task.user_id == user_id,
+            Task.status == TaskStatus.done,
+        )
+        .distinct()
+        .order_by(Task.target_date.asc())
+    )
+    completed_dates_res = await session.execute(completed_dates_stmt)
+    completed_dates_list = [row[0] for row in completed_dates_res.all()]
+    completed_dates_set = set(completed_dates_list)
+
+    # Current streak calculation
+    streak_current = 0
+    if today in completed_dates_set:
+        cur = today
+        while cur in completed_dates_set:
+            streak_current += 1
+            cur -= timedelta(days=1)
+    elif (today - timedelta(days=1)) in completed_dates_set:
+        cur = today - timedelta(days=1)
+        while cur in completed_dates_set:
+            streak_current += 1
+            cur -= timedelta(days=1)
+    else:
+        streak_current = 0
+
+    # Longest streak calculation
+    streak_longest = 0
+    if completed_dates_list:
+        current_run = 1
+        max_run = 1
+        for i in range(1, len(completed_dates_list)):
+            if completed_dates_list[i] == completed_dates_list[i - 1] + timedelta(days=1):
+                current_run += 1
+                if current_run > max_run:
+                    max_run = current_run
+            else:
+                current_run = 1
+        streak_longest = max(max_run, streak_current)
+
+    # 2. Daily trends within the requested window [start_date, today]
+    start_date = today - timedelta(days=days - 1)
+
+    trends_stmt = (
+        select(
+            Task.target_date,
+            func.count(Task.id).label("total_tasks"),
+            func.count(case((Task.status == TaskStatus.done, Task.id))).label("completed_tasks"),
+        )
+        .where(
+            Task.user_id == user_id,
+            Task.target_date >= start_date,
+            Task.target_date <= today,
+            Task.status != TaskStatus.canceled,
+        )
+        .group_by(Task.target_date)
+    )
+    trends_res = await session.execute(trends_stmt)
+    date_map = {
+        row.target_date: (int(row.total_tasks), int(row.completed_tasks))
+        for row in trends_res.all()
+    }
+
+    daily_trends: list[DailyTrendItem] = []
+    for i in range(days):
+        cur_date = start_date + timedelta(days=i)
+        total, completed = date_map.get(cur_date, (0, 0))
+        rate = round((completed / total) * 100.0, 1) if total > 0 else 0.0
+        daily_trends.append(
+            DailyTrendItem(
+                date=cur_date,
+                completed_tasks=completed,
+                total_tasks=total,
+                completion_rate=rate,
+            )
+        )
+
+    # 3. Tag breakdown and window summary metrics
+    tasks_stmt = (
+        select(Task.tag, Task.status)
+        .where(
+            Task.user_id == user_id,
+            Task.target_date >= start_date,
+            Task.target_date <= today,
+            Task.status != TaskStatus.canceled,
+        )
+    )
+    tasks_res = await session.execute(tasks_stmt)
+    tasks_rows = tasks_res.all()
+
+    window_total_tasks = len(tasks_rows)
+    window_completed_tasks = sum(1 for row in tasks_rows if row.status == TaskStatus.done)
+    window_completion_rate = (
+        round((window_completed_tasks / window_total_tasks) * 100.0, 1)
+        if window_total_tasks > 0
+        else 0.0
+    )
+
+    tag_counts: dict[str, int] = {}
+    tag_completed: dict[str, int] = {}
+
+    for row in tasks_rows:
+        raw_tag = row.tag
+        if raw_tag is None or not str(raw_tag).strip():
+            tag_key = "Без тегу"
+        else:
+            tag_key = str(raw_tag).strip()
+        tag_counts[tag_key] = tag_counts.get(tag_key, 0) + 1
+        if row.status == TaskStatus.done:
+            tag_completed[tag_key] = tag_completed.get(tag_key, 0) + 1
+
+    tag_breakdown: list[TagBreakdownItem] = []
+    for tag_name, count in tag_counts.items():
+        completed_cnt = tag_completed.get(tag_name, 0)
+        pct = (
+            round((count / window_total_tasks) * 100.0, 1)
+            if window_total_tasks > 0
+            else 0.0
+        )
+        tag_breakdown.append(
+            TagBreakdownItem(
+                tag=tag_name,
+                count=count,
+                completed_count=completed_cnt,
+                percentage=pct,
+            )
+        )
+
+    tag_breakdown.sort(key=lambda item: (-item.count, item.tag))
+
+    return AnalyticsResponse(
+        streak_current=streak_current,
+        streak_longest=streak_longest,
+        total_tasks=window_total_tasks,
+        completed_tasks=window_completed_tasks,
+        completion_rate=window_completion_rate,
+        daily_trends=daily_trends,
+        tag_breakdown=tag_breakdown,
+    )
+
 
 

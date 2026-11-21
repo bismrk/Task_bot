@@ -17,7 +17,7 @@ interface TabItemConfig {
 const TABS: TabItemConfig[] = [
   { id: 'today', label: 'Сьогодні', icon: CheckSquare },
   { id: 'calendar', label: 'Календар', icon: Calendar },
-  { id: 'analytics', label: 'Аналітика', icon: BarChart3, disabled: true },
+  { id: 'analytics', label: 'Аналітика', icon: BarChart3 },
   { id: 'settings', label: 'Налаштування', icon: Settings, disabled: true },
 ];
 

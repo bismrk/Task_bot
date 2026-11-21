@@ -1,4 +1,5 @@
 import type {
+  AnalyticsResponse,
   CalendarDaySummary,
   TaskCreate,
   TaskRead,
@@ -127,6 +128,14 @@ export async function fetchCalendarSummary(
   return apiRequest<CalendarDaySummary[]>(
     `/api/tasks/calendar-summary?year=${year}&month=${month}`
   );
+}
+
+/**
+ * Fetch productivity analytics, streaks, and trends (REQ-API-01, REQ-TMA-04).
+ */
+export async function fetchAnalytics(days?: number): Promise<AnalyticsResponse> {
+  const query = days !== undefined ? `?days=${days}` : '';
+  return apiRequest<AnalyticsResponse>(`/api/tasks/analytics${query}`);
 }
 
 
