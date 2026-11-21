@@ -1,0 +1,39 @@
+# Version control
+.git/
+.gitignore
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Node & Frontend dependencies and artifacts
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Python caches and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Tests & Documentation
+tests/
+_docs/
+
+# Local databases and runtime state
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+tasks.db
+tasks.db-*
+data/
+*.log
+
+# Sensitive environment variables
+.env
+.env.local
