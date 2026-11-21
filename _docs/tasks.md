@@ -1168,63 +1168,63 @@ Build an interactive Calendar View and navigation tab bar in the Telegram Mini A
 
 ### Acceptance criteria
 
-- [ ] `src/schemas/task.py` defines `CalendarDaySummary` model inheriting from Pydantic `BaseModel` with fields: `date: date`, `total_tasks: int`, `completed_tasks: int`, and `status: Literal["all_done", "partial", "todo_only"]` (REQ-TMA-03).
-- [ ] `CalendarDaySummary.status` reflects the completion ratio: `"all_done"` if `completed_tasks == total_tasks > 0`; `"partial"` if `0 < completed_tasks < total_tasks`; `"todo_only"` if `completed_tasks == 0 < total_tasks`.
-- [ ] `src/schemas/__init__.py` imports and exposes `CalendarDaySummary`.
-- [ ] `src/services/task_service.py` defines async `get_calendar_summary(session: AsyncSession, user_id: int, year: int, month: int) -> list[CalendarDaySummary]` (REQ-TMA-03, REQ-NFR-02).
-- [ ] `get_calendar_summary` computes the start and end dates of the requested month using `calendar.monthrange(year, month)` (accounting for leap years in February).
-- [ ] `get_calendar_summary` queries tasks where `Task.user_id == user_id`, `Task.target_date >= start_date`, and `Task.target_date <= end_date`, excluding canceled tasks (`Task.status != TaskStatus.canceled`).
-- [ ] `get_calendar_summary` aggregates task counts per day (`total_tasks = count()`, `completed_tasks = count(status == done)`), assigns the corresponding `status` indicator, and returns summaries ordered by `date ASC`.
-- [ ] When no tasks exist for a user in the requested month, `get_calendar_summary` returns an empty list `[]`.
-- [ ] `get_calendar_summary` strictly enforces tenant isolation by querying only `Task.user_id == user_id`, ensuring tasks of other users are never returned (REQ-NFR-02).
-- [ ] `src/services/__init__.py` imports and exposes `get_calendar_summary`.
-- [ ] `src/api/routes/tasks.py` defines `GET /api/tasks/calendar-summary` endpoint accepting query parameters `year: int = Query(..., ge=1900, le=2100)` and `month: int = Query(..., ge=1, le=12)`, returning `list[CalendarDaySummary]` (REQ-TMA-03).
-- [ ] Endpoint requires Telegram authentication via `current_user: User = Depends(get_current_user)` (REQ-API-01).
-- [ ] Requests without valid Telegram `Authorization: tma <initData>` return HTTP 401 Unauthorized.
-- [ ] Requests with invalid query parameters (e.g. `month=0`, `month=13`, `year=1899`, `year=2101`) are rejected with HTTP 422 Unprocessable Entity.
-- [ ] Endpoint is registered before dynamic path `GET /api/tasks/{task_id}` to prevent FastAPI route collision.
-- [ ] `frontend/src/api/types.ts` defines `CalendarDaySummary` interface containing: `date: string`, `total_tasks: number`, `completed_tasks: number`, and `status: 'all_done' | 'partial' | 'todo_only'`.
-- [ ] `frontend/src/api/types.ts` defines navigation tab type union `type AppTab = 'today' | 'calendar' | 'analytics' | 'settings'`.
-- [ ] `frontend/src/api/client.ts` implements and exports `fetchCalendarSummary(year: number, month: number): Promise<CalendarDaySummary[]>` calling `GET /api/tasks/calendar-summary?year=${year}&month=${month}` with Telegram `Authorization` header (REQ-API-01, REQ-TMA-03).
-- [ ] `frontend/src/components/NavigationTabBar.tsx` renders a bottom navigation tab bar allowing switching between screens: "Сьогодні" (Today) and "Календар" (Calendar).
-- [ ] Navigation bar visually highlights the active tab with primary accent styling (`text-primary`, active background/indicator) and inactive tabs with muted styling (`text-muted`).
-- [ ] Includes placeholder/disabled tab items for future tabs: "Аналітика" (#16) and "Налаштування" (#17).
-- [ ] Tapping a tab triggers Telegram haptic feedback `impactOccurred('light')` via `window.Telegram?.WebApp?.HapticFeedback` when available.
-- [ ] `frontend/src/components/CalendarView.tsx` renders the calendar screen with month navigation, 7-column calendar grid, activity dots, and selected date task list (REQ-TMA-03).
-- [ ] Header renders the current viewed month and year formatted in Ukrainian (e.g. "Листопад 2026") with `<` (previous month) and `>` (next month) navigation buttons.
-- [ ] Clicking `<` or `>` transitions month view across month and year boundaries (e.g., from January to December of previous year) and triggers `fetchCalendarSummary` for the new month.
-- [ ] Includes a "Сьогодні" shortcut button to jump directly back to the current month and today's date.
-- [ ] Grid displays 7 weekday column headers starting on Monday per `_docs/design-system.md`: "Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд".
-- [ ] Grid correctly calculates the first day of the month offset and pads prior and next month days so calendar rows align accurately with Monday start.
-- [ ] Days with scheduled tasks display activity indicator dots below the day number per `_docs/design-system.md`:
+- [x] `src/schemas/task.py` defines `CalendarDaySummary` model inheriting from Pydantic `BaseModel` with fields: `date: date`, `total_tasks: int`, `completed_tasks: int`, and `status: Literal["all_done", "partial", "todo_only"]` (REQ-TMA-03).
+- [x] `CalendarDaySummary.status` reflects the completion ratio: `"all_done"` if `completed_tasks == total_tasks > 0`; `"partial"` if `0 < completed_tasks < total_tasks`; `"todo_only"` if `completed_tasks == 0 < total_tasks`.
+- [x] `src/schemas/__init__.py` imports and exposes `CalendarDaySummary`.
+- [x] `src/services/task_service.py` defines async `get_calendar_summary(session: AsyncSession, user_id: int, year: int, month: int) -> list[CalendarDaySummary]` (REQ-TMA-03, REQ-NFR-02).
+- [x] `get_calendar_summary` computes the start and end dates of the requested month using `calendar.monthrange(year, month)` (accounting for leap years in February).
+- [x] `get_calendar_summary` queries tasks where `Task.user_id == user_id`, `Task.target_date >= start_date`, and `Task.target_date <= end_date`, excluding canceled tasks (`Task.status != TaskStatus.canceled`).
+- [x] `get_calendar_summary` aggregates task counts per day (`total_tasks = count()`, `completed_tasks = count(status == done)`), assigns the corresponding `status` indicator, and returns summaries ordered by `date ASC`.
+- [x] When no tasks exist for a user in the requested month, `get_calendar_summary` returns an empty list `[]`.
+- [x] `get_calendar_summary` strictly enforces tenant isolation by querying only `Task.user_id == user_id`, ensuring tasks of other users are never returned (REQ-NFR-02).
+- [x] `src/services/__init__.py` imports and exposes `get_calendar_summary`.
+- [x] `src/api/routes/tasks.py` defines `GET /api/tasks/calendar-summary` endpoint accepting query parameters `year: int = Query(..., ge=1900, le=2100)` and `month: int = Query(..., ge=1, le=12)`, returning `list[CalendarDaySummary]` (REQ-TMA-03).
+- [x] Endpoint requires Telegram authentication via `current_user: User = Depends(get_current_user)` (REQ-API-01).
+- [x] Requests without valid Telegram `Authorization: tma <initData>` return HTTP 401 Unauthorized.
+- [x] Requests with invalid query parameters (e.g. `month=0`, `month=13`, `year=1899`, `year=2101`) are rejected with HTTP 422 Unprocessable Entity.
+- [x] Endpoint is registered before dynamic path `GET /api/tasks/{task_id}` to prevent FastAPI route collision.
+- [x] `frontend/src/api/types.ts` defines `CalendarDaySummary` interface containing: `date: string`, `total_tasks: number`, `completed_tasks: number`, and `status: 'all_done' | 'partial' | 'todo_only'`.
+- [x] `frontend/src/api/types.ts` defines navigation tab type union `type AppTab = 'today' | 'calendar' | 'analytics' | 'settings'`.
+- [x] `frontend/src/api/client.ts` implements and exports `fetchCalendarSummary(year: number, month: number): Promise<CalendarDaySummary[]>` calling `GET /api/tasks/calendar-summary?year=${year}&month=${month}` with Telegram `Authorization` header (REQ-API-01, REQ-TMA-03).
+- [x] `frontend/src/components/NavigationTabBar.tsx` renders a bottom navigation tab bar allowing switching between screens: "Сьогодні" (Today) and "Календар" (Calendar).
+- [x] Navigation bar visually highlights the active tab with primary accent styling (`text-primary`, active background/indicator) and inactive tabs with muted styling (`text-muted`).
+- [x] Includes placeholder/disabled tab items for future tabs: "Аналітика" (#16) and "Налаштування" (#17).
+- [x] Tapping a tab triggers Telegram haptic feedback `impactOccurred('light')` via `window.Telegram?.WebApp?.HapticFeedback` when available.
+- [x] `frontend/src/components/CalendarView.tsx` renders the calendar screen with month navigation, 7-column calendar grid, activity dots, and selected date task list (REQ-TMA-03).
+- [x] Header renders the current viewed month and year formatted in Ukrainian (e.g. "Листопад 2026") with `<` (previous month) and `>` (next month) navigation buttons.
+- [x] Clicking `<` or `>` transitions month view across month and year boundaries (e.g., from January to December of previous year) and triggers `fetchCalendarSummary` for the new month.
+- [x] Includes a "Сьогодні" shortcut button to jump directly back to the current month and today's date.
+- [x] Grid displays 7 weekday column headers starting on Monday per `_docs/design-system.md`: "Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд".
+- [x] Grid correctly calculates the first day of the month offset and pads prior and next month days so calendar rows align accurately with Monday start.
+- [x] Days with scheduled tasks display activity indicator dots below the day number per `_docs/design-system.md`:
   - Green dot (`bg-emerald-500` / `bg-green-500`): all tasks completed (`status === "all_done"` / 100%).
   - Amber dot (`bg-amber-500`): partially completed tasks (`status === "partial"`).
   - Gray dot (`bg-slate-400`): scheduled tasks with 0% completed (`status === "todo_only"`).
-- [ ] Days with 0 tasks render no activity indicator dot.
-- [ ] The currently selected date is highlighted with a rounded accent pill / primary background styling per `_docs/design-system.md`.
-- [ ] Today's date is visually distinguished with a badge or subtle border when not selected.
-- [ ] Clicking any calendar day selects that date, triggers Telegram haptic feedback `impactOccurred('light')`, and fetches tasks for that date via `fetchTasks(selectedDate)`.
-- [ ] Below the calendar grid, displays a section header with the selected date (e.g. "Завдання на 21 листопада 2026") and task count.
-- [ ] Renders tasks for the selected date using `TaskCard` items supporting status toggle (`onToggle`) and deletion (`onDelete`).
-- [ ] Toggling or deleting a task updates local state optimistically and recalculates the calendar indicator dot for that day.
-- [ ] When 0 tasks exist on the selected date, renders an empty state card ("На цей день завдань немає") with an icon and prompt to add tasks.
-- [ ] Renders a `+ Додати завдання` button that opens `TaskCreationModal` with `targetDate` pre-filled to the selected date.
-- [ ] Creating a task via `TaskCreationModal` appends the task to the selected date's list and updates the calendar day's indicator dot.
-- [ ] Displays a loading spinner or skeleton while calendar summary or selected date tasks are being fetched.
-- [ ] Displays an error banner with a retry button if loading calendar summary fails.
-- [ ] `frontend/src/App.tsx` embeds `NavigationTabBar` and conditionally renders `TodayChecklist` or `CalendarView` based on active tab state.
-- [ ] Running `npm run typecheck` in `frontend/` passes with exit code 0 and 0 errors.
-- [ ] Running `npm run build` in `frontend/` passes with exit code 0 and updates `frontend/dist/`.
-- [ ] `tests/integration/test_api_calendar_summary.py` contains automated integration tests using `TestClient` and in-memory SQLite fixture with valid signed `initData`.
-- [ ] Automated tests verify `GET /api/tasks/calendar-summary` returns daily summaries with accurate `total_tasks`, `completed_tasks`, and `status` values (`all_done`, `partial`, `todo_only`) (REQ-TMA-03).
-- [ ] Automated tests verify that a month with 0 tasks returns an empty list `[]`.
-- [ ] Automated tests verify invalid query parameters: `month=0`, `month=13`, `year=1899`, `year=2101` return HTTP 422 Unprocessable Entity.
-- [ ] Automated tests verify authentication: requests without `Authorization` header or with invalid signature return HTTP 401 Unauthorized (REQ-API-01).
-- [ ] Automated tests verify strict tenant isolation: tasks belonging to User B are never included in User A's monthly summary (REQ-NFR-02).
-- [ ] Automated tests verify month boundaries: tasks in adjacent months (e.g., last day of previous month or first day of next month) are excluded from the summary.
-- [ ] All test functions contain docstrings referencing requirement IDs (`REQ-TMA-03`, `REQ-API-01`, `REQ-API-02`, `REQ-NFR-02`).
-- [ ] Running `uv run pytest tests/integration/test_api_calendar_summary.py` passes with exit code 0.
-- [ ] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
+- [x] Days with 0 tasks render no activity indicator dot.
+- [x] The currently selected date is highlighted with a rounded accent pill / primary background styling per `_docs/design-system.md`.
+- [x] Today's date is visually distinguished with a badge or subtle border when not selected.
+- [x] Clicking any calendar day selects that date, triggers Telegram haptic feedback `impactOccurred('light')`, and fetches tasks for that date via `fetchTasks(selectedDate)`.
+- [x] Below the calendar grid, displays a section header with the selected date (e.g. "Завдання на 21 листопада 2026") and task count.
+- [x] Renders tasks for the selected date using `TaskCard` items supporting status toggle (`onToggle`) and deletion (`onDelete`).
+- [x] Toggling or deleting a task updates local state optimistically and recalculates the calendar indicator dot for that day.
+- [x] When 0 tasks exist on the selected date, renders an empty state card ("На цей день завдань немає") with an icon and prompt to add tasks.
+- [x] Renders a `+ Додати завдання` button that opens `TaskCreationModal` with `targetDate` pre-filled to the selected date.
+- [x] Creating a task via `TaskCreationModal` appends the task to the selected date's list and updates the calendar day's indicator dot.
+- [x] Displays a loading spinner or skeleton while calendar summary or selected date tasks are being fetched.
+- [x] Displays an error banner with a retry button if loading calendar summary fails.
+- [x] `frontend/src/App.tsx` embeds `NavigationTabBar` and conditionally renders `TodayChecklist` or `CalendarView` based on active tab state.
+- [x] Running `npm run typecheck` in `frontend/` passes with exit code 0 and 0 errors.
+- [x] Running `npm run build` in `frontend/` passes with exit code 0 and updates `frontend/dist/`.
+- [x] `tests/integration/test_api_calendar_summary.py` contains automated integration tests using `TestClient` and in-memory SQLite fixture with valid signed `initData`.
+- [x] Automated tests verify `GET /api/tasks/calendar-summary` returns daily summaries with accurate `total_tasks`, `completed_tasks`, and `status` values (`all_done`, `partial`, `todo_only`) (REQ-TMA-03).
+- [x] Automated tests verify that a month with 0 tasks returns an empty list `[]`.
+- [x] Automated tests verify invalid query parameters: `month=0`, `month=13`, `year=1899`, `year=2101` return HTTP 422 Unprocessable Entity.
+- [x] Automated tests verify authentication: requests without `Authorization` header or with invalid signature return HTTP 401 Unauthorized (REQ-API-01).
+- [x] Automated tests verify strict tenant isolation: tasks belonging to User B are never included in User A's monthly summary (REQ-NFR-02).
+- [x] Automated tests verify month boundaries: tasks in adjacent months (e.g., last day of previous month or first day of next month) are excluded from the summary.
+- [x] All test functions contain docstrings referencing requirement IDs (`REQ-TMA-03`, `REQ-API-01`, `REQ-API-02`, `REQ-NFR-02`).
+- [x] Running `uv run pytest tests/integration/test_api_calendar_summary.py` passes with exit code 0.
+- [x] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
 
 ### Out of scope
 
