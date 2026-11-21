@@ -1387,8 +1387,149 @@ Develop and integrate an interactive Productivity Analytics Dashboard and daily 
   - Do not write implementation code or modify code files in `src/`, `frontend/`, or `tests/`.
 
 ## 17. User Settings in Mini App and Bot
-Goal: Provide interfaces in both the Mini App and Bot to configure timezones, check-in hours, and deadline alerts.
-Description: Build a settings screen in the Mini App and a `/settings` command handler in the Telegram bot allowing users to select their timezone from a list and customize reminder intervals. Persist updated preferences in the database and synchronize scheduler targets accordingly. Ensure the settings form validates timezone identifiers and reminder time ranges.
+
+### Goal
+
+Implement comprehensive user settings interfaces in both the Telegram bot and Telegram Mini App allowing users to view and update their individual IANA timezone preference, featuring a validated `PATCH /api/settings/timezone` REST API endpoint (with `/api/me/timezone` alias), a Telegram bot `/settings` command handler with interactive quick-selection inline keyboard, and an interactive Settings tab in the Mini App with live local time calculation, search/dropdown selector, and haptic feedback, fully verified by automated integration tests and a production frontend build.
+
+### Acceptance criteria
+
+- [ ] `src/schemas/user.py` defines `TimezoneUpdate(BaseModel)` with field `timezone: str`.
+- [ ] `TimezoneUpdate` validates that `timezone` is a valid IANA timezone string using `validate_timezone` (or `_validate_timezone` calling `zoneinfo.ZoneInfo(tz)`), raising `ValueError` for invalid timezone identifiers.
+- [ ] `src/schemas/user.py` exports `TimezoneUpdate` alongside existing schemas (`UserBase`, `UserCreate`, `UserUpdate`, `UserRead`).
+- [ ] `src/schemas/__init__.py` imports and exposes `TimezoneUpdate`.
+- [ ] `src/api/routes/settings.py` creates `router = APIRouter(prefix="/api/settings", tags=["settings"])` (or `settings_router`).
+- [ ] `PATCH /api/settings/timezone` endpoint:
+  - Accepts `payload: TimezoneUpdate` in request body.
+  - Requires Telegram initData authentication via `current_user: User = Depends(get_current_user)` (REQ-API-01).
+  - Injects database session via `session: AsyncSession = Depends(get_session)`.
+  - Invokes `update_user_timezone(session, current_user.telegram_id, payload.timezone)` to persist change in database (REQ-USR-02).
+  - Returns updated `UserRead` object with HTTP 200 OK.
+- [ ] `PATCH /api/me/timezone` endpoint is registered as an alias or route returning updated `UserRead` with HTTP 200 OK.
+- [ ] Passing an invalid timezone string (e.g. `"Mars/Olympus"`, empty string) is rejected with HTTP 422 Unprocessable Entity, leaving existing user timezone unchanged in database (REQ-USR-02).
+- [ ] Requests without `Authorization` header or with invalid Telegram HMAC-SHA256 signature return HTTP 401 Unauthorized (REQ-API-01).
+- [ ] Tenant isolation is enforced: endpoint operates strictly on `current_user.telegram_id` and cannot modify any other user's settings (REQ-NFR-02).
+- [ ] `src/api/routes/__init__.py` imports and exposes `settings_router`.
+- [ ] `src/api/app.py` registers `settings_router` in `create_app` via `app.include_router(settings_router)`.
+- [ ] `src/bot/keyboards/settings.py` defines `TimezoneCallback(CallbackData, prefix="tz")` with field `timezone: str`.
+- [ ] `src/bot/keyboards/settings.py` defines `get_settings_keyboard(current_tz: str, webapp_url: str | None = None) -> InlineKeyboardMarkup`:
+  - Arranges quick timezone selection buttons with a maximum of 2 buttons per row per `_docs/design-system.md`.
+  - Includes quick timezone presets:
+    - `🇺🇦 Київ` (`Europe/Kyiv`)
+    - `🇵🇱 Варшава` (`Europe/Warsaw`)
+    - `🇬🇧 Лондон` (`Europe/London`)
+    - `🇺🇸 Нью-Йорк` (`America/New_York`)
+    - `🇯🇵 Токіо` (`Asia/Tokyo`)
+  - Displays a visual checkmark (`✓` or `✅`) on the currently active timezone button (e.g. `🇺🇦 Київ ✓`).
+  - Includes a button to launch the Mini App Settings:
+    - When `webapp_url` is provided, creates `InlineKeyboardButton(text="⚙️ Відкрити в Mini App", web_app=WebAppInfo(url=webapp_url))`.
+    - When `webapp_url` is None/empty, creates fallback `InlineKeyboardButton(text="⚙️ Відкрити в Mini App", callback_data="open_settings_app")`.
+- [ ] `src/bot/keyboards/__init__.py` imports and exposes `TimezoneCallback` and `get_settings_keyboard`.
+- [ ] `src/bot/handlers/settings.py` creates `router = Router(name="settings")` (or `settings_router`).
+- [ ] Command handler `@router.message(Command("settings"))`:
+  - Retrieves or registers user via `get_or_create_user(session, telegram_id=message.from_user.id)`.
+  - Calculates current user local time via `get_user_local_time(user)`.
+  - Replies with HTML-formatted message adhering to `_docs/design-system.md`:
+    - Header: `⚙️ <b>Налаштування</b>`
+    - Current timezone: `🌍 Часовий пояс: <code>{user.timezone}</code>`
+    - Current local time: `🕒 Поточний локальний час: <code>{local_time.strftime('%H:%M, %d.%m.%Y')}</code>`
+    - Instructional prompt explaining that quick timezones can be picked below or all timezones configured in Mini App.
+  - Attaches `get_settings_keyboard(current_tz=user.timezone, webapp_url=webapp_url)`.
+  - Safely returns `None` if `message.from_user` is None.
+- [ ] Callback query handler handling `TimezoneCallback.filter()`:
+  - Verifies callback caller: handles callback for `callback_query.from_user.id`.
+  - If selected `callback_data.timezone == user.timezone`, answers callback with notification `await callback_query.answer("Цей часовий пояс уже встановлено.")` without redundant database write.
+  - If selected `callback_data.timezone != user.timezone`, updates timezone via `update_user_timezone(session, callback_query.from_user.id, callback_data.timezone)`.
+  - Calculates new local time via `get_user_local_time(updated_user)`.
+  - Edits original message text confirming change (`✅ Часовий пояс оновлено!`) with new timezone and updated local time.
+  - Edits message reply markup with updated keyboard reflecting the new checkmark via `get_settings_keyboard(current_tz=updated_user.timezone, webapp_url=webapp_url)`.
+  - Acknowledges callback with `await callback_query.answer("Часовий пояс змінено!")`.
+- [ ] `src/bot/handlers/__init__.py` imports and exposes `settings_router`.
+- [ ] `src/bot/dispatcher.py` updates `create_dispatcher` to include `settings_router` in the dispatcher.
+- [ ] `frontend/src/api/types.ts` defines `TimezoneOption` interface with fields `label: string`, `value: string`, and optional `region?: string`.
+- [ ] `frontend/src/api/client.ts` defines and exports `updateTimezone(timezone: string): Promise<UserProfile>`:
+  - Dispatches `PATCH /api/settings/timezone` with body `JSON.stringify({ timezone })`.
+  - Uses `apiRequest<UserProfile>` ensuring `Authorization: tma <raw_init_data>` header is attached.
+  - Returns updated `UserProfile` on success or throws descriptive Error on failure.
+- [ ] `frontend/src/components/NavigationTabBar.tsx` enables the "Налаштування" tab:
+  - Removes `disabled: true` from the `settings` item in `TABS` array.
+  - Clicking "Налаштування" tab triggers `impactOccurred('light')` and invokes `onTabChange('settings')`.
+- [ ] `frontend/src/components/SettingsView.tsx` creates and exports `SettingsView` component taking props `{ user: UserProfile, onUserUpdated: (updated: UserProfile) => void }`.
+- [ ] `SettingsView` displays user profile details card:
+  - User Telegram ID (`ID: {user.telegram_id}`).
+  - Account created date formatted cleanly.
+  - Current configured timezone and live/formatted local time clock.
+- [ ] `SettingsView` provides timezone selection interface:
+  - Search input allowing real-time filtering of timezones by city or region name.
+  - Curated list / dropdown of major global timezones covering Europe, Americas, Asia, and Pacific (e.g. `Europe/Kyiv`, `Europe/Warsaw`, `Europe/London`, `Europe/Berlin`, `America/New_York`, `America/Los_Angeles`, `Asia/Tokyo`, `Asia/Dubai`, etc.).
+  - Visual indicator (checkmark / highlight) on the currently selected timezone.
+- [ ] `SettingsView` provides save action and user feedback:
+  - "Зберегти" button to submit selected timezone via `updateTimezone`.
+  - Loading state on button while save request is in flight.
+  - Success feedback: invokes Telegram haptic feedback `notificationOccurred('success')`, displays confirmation toast/badge (`✅ Налаштування збережено`), and calls `onUserUpdated` to update global user state in `App.tsx`.
+  - Error feedback: on failure, invokes `notificationOccurred('error')` and displays an error alert banner with retry capability.
+  - Adheres to `_docs/design-system.md` styling with native Telegram CSS theme variables and dark mode compatibility.
+- [ ] `frontend/src/App.tsx` conditionally renders `<SettingsView user={user} onUserUpdated={(updated) => setUser(updated)} />` when `activeTab === 'settings'`.
+- [ ] Running `npm run typecheck` in `frontend/` succeeds with exit code 0 and 0 TypeScript errors.
+- [ ] Running `npm run build` in `frontend/` succeeds with exit code 0 and outputs production assets in `frontend/dist/`.
+- [ ] `tests/integration/test_api_settings.py` tests REST API endpoints against in-memory SQLite database:
+  - Successful timezone update: authenticated `PATCH /api/settings/timezone` with valid timezone updates database and returns HTTP 200 with updated `UserRead` (REQ-USR-02).
+  - Validation rejection: `PATCH /api/settings/timezone` with invalid timezone (e.g., `"Invalid/Timezone"`) returns HTTP 422 Unprocessable Entity and keeps original timezone in database (REQ-USR-02).
+  - Authentication check: requests without `Authorization` or with forged HMAC return HTTP 401 Unauthorized (REQ-API-01).
+  - Tenant isolation: User A cannot modify User B's timezone settings (REQ-NFR-02).
+  - Alias route: `PATCH /api/me/timezone` successfully updates timezone and returns HTTP 200.
+- [ ] `tests/integration/test_bot_settings.py` tests bot handlers with mocked Telegram Bot:
+  - `/settings` command returns formatted message with current timezone, local time, and inline keyboard containing quick timezone buttons and WebApp launcher (REQ-USR-02).
+  - Timezone selection callback updates user timezone in database, updates message text to show new timezone and local time, updates inline keyboard checkmark, and answers callback query (REQ-USR-02).
+  - Selecting already active timezone performs no database write and answers callback query with already-set notice.
+  - Unregistered user calling `/settings` is registered automatically with default `Europe/Kyiv`.
+- [ ] All test functions contain docstrings referencing requirement IDs (`REQ-USR-02`, `REQ-API-01`, `REQ-NFR-02`).
+- [ ] Running `uv run pytest tests/integration/test_api_settings.py` passes with exit code 0.
+- [ ] Running `uv run pytest tests/integration/test_bot_settings.py` passes with exit code 0.
+- [ ] Full test suite `uv run pytest` passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- End-to-end multi-process startup runner (`main.py`), unified Dockerfile, Docker Compose configuration, and deployment verification, moved to #18
+- User-customizable check-in hours (custom morning push / midnight review times) and configurable deadline reminder intervals in database and scheduler, moved to #19
+- Manual dark/light theme toggle in Mini App (theme is automatically synchronized with Telegram client theme per `_docs/design-system.md`), moved to future backlog
+- Multi-language localization settings (UI is standardized in Ukrainian per system requirements), moved to future backlog
+
+### Constraints
+
+- Files this should stay inside:
+  - Backend:
+    - `src/schemas/user.py`
+    - `src/schemas/__init__.py`
+    - `src/api/routes/settings.py`
+    - `src/api/routes/__init__.py`
+    - `src/api/app.py`
+    - `src/bot/keyboards/settings.py`
+    - `src/bot/keyboards/__init__.py`
+    - `src/bot/handlers/settings.py`
+    - `src/bot/handlers/__init__.py`
+    - `src/bot/dispatcher.py`
+    - `tests/integration/test_api_settings.py`
+    - `tests/integration/test_bot_settings.py`
+  - Frontend:
+    - `frontend/src/api/types.ts`
+    - `frontend/src/api/client.ts`
+    - `frontend/src/components/NavigationTabBar.tsx`
+    - `frontend/src/components/SettingsView.tsx`
+    - `frontend/src/App.tsx`
+    - `frontend/dist/**`
+- Libraries to use:
+  - Backend: FastAPI, aiogram 3 (`Router`, `Command`, `CallbackData`, `InlineKeyboardMarkup`, `InlineKeyboardButton`, `WebAppInfo`, `Message`, `CallbackQuery`), SQLAlchemy 2.0 (`AsyncSession`, `select`), Pydantic 2 (`BaseModel`, `field_validator`, `ConfigDict`), Python standard library (`datetime`, `zoneinfo`), pytest, pytest-asyncio, `fastapi.testclient.TestClient`, `unittest.mock` (`AsyncMock`, `MagicMock`)
+  - Frontend: React 18, TypeScript, Tailwind CSS, `lucide-react`, `@telegram-apps/sdk-react` / window.Telegram.WebApp
+- Dependencies:
+  - Python dependencies are strictly defined in `pyproject.toml` — do not add new dependencies without explicit permission per `Agents.md`.
+  - Frontend dependencies are defined in `frontend/package.json` — use existing packages (`lucide-react`, Tailwind CSS, etc.).
+- Guidelines:
+  - Follow Telegram bot formatting and UI guidelines in `_docs/design-system.md`: clean semantic emojis (`⚙️`, `🌍`, `🕒`, `✅`), HTML parse mode, inline keyboards max 2 buttons per row, positive actions first.
+  - Follow Mini App UI standards in `_docs/design-system.md`: native Telegram theme variables (`bg-background`, `bg-secondary`, `text-foreground`, `text-muted`, `bg-primary`), mobile safe-area insets, haptic feedback (`impactOccurred('light')` on tab change, `notificationOccurred('success')` on save).
+  - Follow testing conventions in `_docs/testing-guidelines.md`: isolated in-memory SQLite fixture `db_session`, `@pytest.mark.asyncio`, zero real network calls to Telegram API, requirement ID docstrings (`REQ-USR-02`, `REQ-API-01`, `REQ-NFR-02`).
+  - Strictly enforce tenant isolation per `REQ-NFR-02` by always scoping operations to `current_user.telegram_id`.
+  - Do not write implementation code or modify code files in `src/`, `frontend/`, or `tests/`.
 
 ## 18. End-to-End Integration, Packaging, and Deployment Verification
 Goal: Connect all components into a unified runnable application with documentation and deployment configuration.
