@@ -43,6 +43,17 @@ class UserUpdate(BaseModel):
         return _validate_timezone(v)
 
 
+class TimezoneUpdate(BaseModel):
+    """Schema for updating user timezone."""
+
+    timezone: str
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: str) -> str:
+        return _validate_timezone(v)
+
+
 class UserRead(UserBase):
     """User read schema for serializing user records from database or API."""
 

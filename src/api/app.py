@@ -12,11 +12,13 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
 from src.api.auth import get_current_user
-from src.api.routes import tasks_router
+from src.api.deps import get_db_session
+from src.api.routes import settings_router, tasks_router
 from src.core.config import Settings, get_settings
 from src.core.database import async_session_maker
 from src.models.user import User
-from src.schemas.user import UserRead
+from src.schemas.user import TimezoneUpdate, UserRead
+from src.services.user_service import update_user_timezone
 
 DEFAULT_FRONTEND_DIST: Final[Path] = (
     Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
@@ -68,6 +70,7 @@ def create_app(
     )
 
     app.include_router(tasks_router)
+    app.include_router(settings_router)
 
     @app.get("/health")
     async def health_check() -> dict[str, str]:
@@ -78,6 +81,20 @@ def create_app(
     async def get_me(current_user: User = Depends(get_current_user)) -> User:
         """Return the profile of the authenticated Telegram user."""
         return current_user
+
+    @app.patch("/api/me/timezone", response_model=UserRead, tags=["settings"])
+    async def update_me_timezone(
+        payload: TimezoneUpdate,
+        current_user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_db_session),
+    ) -> User:
+        """Update the timezone of the authenticated Telegram user (alias)."""
+        updated_user = await update_user_timezone(
+            session=session,
+            telegram_id=current_user.telegram_id,
+            timezone=payload.timezone,
+        )
+        return updated_user
 
     dist_path = (
         Path(frontend_dist)

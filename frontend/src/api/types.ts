@@ -108,4 +108,14 @@ export interface AnalyticsResponse {
   tag_breakdown: TagBreakdownItem[];
 }
 
+/**
+ * Timezone option interface for settings dropdown/search selector.
+ */
+export interface TimezoneOption {
+  label: string;
+  value: string;
+  region?: string;
+}
+
+
 

@@ -18,7 +18,7 @@ const TABS: TabItemConfig[] = [
   { id: 'today', label: 'Сьогодні', icon: CheckSquare },
   { id: 'calendar', label: 'Календар', icon: Calendar },
   { id: 'analytics', label: 'Аналітика', icon: BarChart3 },
-  { id: 'settings', label: 'Налаштування', icon: Settings, disabled: true },
+  { id: 'settings', label: 'Налаштування', icon: Settings },
 ];
 
 export const NavigationTabBar: React.FC<NavigationTabBarProps> = ({

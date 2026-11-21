@@ -9,6 +9,7 @@ from src.bot.handlers import (
     callbacks_router,
     deadline_router,
     rollover_router,
+    settings_router,
     start_router,
     voice_text_router,
 )
@@ -56,7 +57,14 @@ def create_dispatcher(
     dp.callback_query.middleware(db_middleware)
 
     # Detach routers if previously attached in factory context, then include
-    for r in (start_router, voice_text_router, callbacks_router, rollover_router, deadline_router):
+    for r in (
+        start_router,
+        voice_text_router,
+        callbacks_router,
+        rollover_router,
+        deadline_router,
+        settings_router,
+    ):
         if r._parent_router is not None:
             r._parent_router = None
         dp.include_router(r)

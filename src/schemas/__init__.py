@@ -11,13 +11,14 @@ from src.schemas.task import (
     TaskRead,
     TaskUpdate,
 )
-from src.schemas.user import UserBase, UserCreate, UserRead, UserUpdate
+from src.schemas.user import TimezoneUpdate, UserBase, UserCreate, UserRead, UserUpdate
 
 __all__ = [
     "UserBase",
     "UserCreate",
     "UserUpdate",
     "UserRead",
+    "TimezoneUpdate",
     "ExtractedTask",
     "TaskExtractionResult",
     "TaskCreate",

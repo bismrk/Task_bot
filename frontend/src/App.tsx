@@ -4,6 +4,7 @@ import type { AppTab, TaskRead, UserProfile } from './api/types';
 import { TodayChecklist } from './components/TodayChecklist';
 import { CalendarView } from './components/CalendarView';
 import { AnalyticsView } from './components/AnalyticsView';
+import { SettingsView } from './components/SettingsView';
 import { NavigationTabBar } from './components/NavigationTabBar';
 import {
   User,
@@ -167,6 +168,14 @@ export default function App() {
 
             {/* Analytics View */}
             {activeTab === 'analytics' && <AnalyticsView />}
+
+            {/* Settings View */}
+            {activeTab === 'settings' && user && (
+              <SettingsView
+                user={user}
+                onUserUpdated={(updated) => setUser(updated)}
+              />
+            )}
           </div>
         )}
       </main>

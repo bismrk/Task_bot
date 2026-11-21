@@ -176,3 +176,14 @@ export async function deleteTask(taskId: number): Promise<void> {
     method: 'DELETE',
   });
 }
+
+/**
+ * Update user timezone preference (REQ-USR-02).
+ */
+export async function updateTimezone(timezone: string): Promise<UserProfile> {
+  return apiRequest<UserProfile>('/api/settings/timezone', {
+    method: 'PATCH',
+    body: JSON.stringify({ timezone }),
+  });
+}
+
