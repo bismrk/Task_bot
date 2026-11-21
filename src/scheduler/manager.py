@@ -7,7 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.scheduler.jobs import run_timezone_checks
+from src.scheduler.jobs import run_deadline_checks, run_timezone_checks
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,16 @@ def setup_scheduler(
         args=[bot, sessionmaker, webapp_url],
         id="timezone_checks",
         name="Timezone-Aware Background Checks",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        run_deadline_checks,
+        trigger=CronTrigger(second=30, timezone="UTC"),
+        args=[bot, sessionmaker],
+        id="deadline_checks",
+        name="Deadline Proximity Checks",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

@@ -1,6 +1,7 @@
 """Timezone-aware background scheduler jobs and per-user triggers."""
 
-from datetime import datetime
+from datetime import datetime, timezone
+import html
 import logging
 from zoneinfo import ZoneInfo
 
@@ -10,8 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.handlers.rollover import send_midnight_rollover_dialogue
+from src.bot.keyboards.deadline import get_deadline_keyboard
 from src.bot.keyboards.start import get_start_keyboard
-from src.models.task import TaskPriority, TaskStatus
+from src.models.task import Task, TaskPriority, TaskStatus
 from src.models.user import User
 from src.services.task_service import (
     ensure_recurring_tasks_for_date,
@@ -283,6 +285,211 @@ async def run_timezone_checks(
                 )
                 await session.rollback()
                 session.expunge_all()
+                stats["errors"] += 1
+
+    return stats
+
+
+async def run_deadline_checks(
+    bot: Bot,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    now_dt: datetime | None = None,
+) -> dict[str, int]:
+    """Monitor upcoming deadlines and dispatch -1h and -10m reminders (REQ-SCH-03).
+
+    Opens an async database session using sessionmaker(), queries all tasks where
+    status == TaskStatus.todo and deadline_at is not None.
+    Computes delta_sec between deadline_at and now_dt (normalized to UTC).
+    Sends notifications with inline action buttons [✅ Виконано] and [⏰ +15 хв].
+    Provides per-task exception isolation (REQ-NFR-02) and restart-resilient
+    idempotency tracking (REQ-NFR-03).
+
+    Args:
+        bot: aiogram Bot instance.
+        sessionmaker: SQLAlchemy async sessionmaker factory.
+        now_dt: Optional reference datetime for simulation/testing (defaults to UTC now).
+
+    Returns:
+        dict[str, int]: {"reminders_1h_sent": count1h, "reminders_10m_sent": count10m, "errors": err_count}
+    """
+    stats = {
+        "reminders_1h_sent": 0,
+        "reminders_10m_sent": 0,
+        "errors": 0,
+    }
+
+    if now_dt is None:
+        now_utc = datetime.now(timezone.utc)
+    elif now_dt.tzinfo is None:
+        now_utc = now_dt.replace(tzinfo=timezone.utc)
+    else:
+        now_utc = now_dt.astimezone(timezone.utc)
+
+    async with sessionmaker() as session:
+        stmt = select(Task.id).where(
+            Task.status == TaskStatus.todo,
+            Task.deadline_at.isnot(None),
+        )
+        result = await session.execute(stmt)
+        task_ids = list(result.scalars().all())
+
+        for task_id in task_ids:
+            task = await session.get(Task, task_id)
+            if task is None or task.status != TaskStatus.todo or task.deadline_at is None:
+                continue
+
+            try:
+                deadline_dt = task.deadline_at
+                if deadline_dt.tzinfo is None:
+                    deadline_utc = deadline_dt.replace(tzinfo=timezone.utc)
+                else:
+                    deadline_utc = deadline_dt.astimezone(timezone.utc)
+
+                delta_sec = (deadline_utc - now_utc).total_seconds()
+
+                # Past deadline: ignore
+                if delta_sec <= 0:
+                    continue
+
+                # 10-minute proximity check (-10m)
+                if 0 < delta_sec <= 600:
+                    if not task.reminder_sent_10m:
+                        user = await session.get(User, task.user_id)
+                        user_tz = (
+                            ZoneInfo(user.timezone)
+                            if user and user.timezone
+                            else ZoneInfo("Europe/Kyiv")
+                        )
+                        deadline_local = deadline_utc.astimezone(user_tz)
+                        time_str = deadline_local.strftime("%H:%M")
+
+                        meta_parts: list[str] = []
+                        if task.priority == TaskPriority.high:
+                            meta_parts.append("⚠️ Високий")
+                        elif task.priority == TaskPriority.low:
+                            meta_parts.append("💤 Низький")
+                        else:
+                            meta_parts.append("⚡ Середній")
+
+                        if task.tag:
+                            clean_tag = task.tag.lstrip("#")
+                            meta_parts.append(f"🏷️ #{clean_tag}")
+
+                        meta_parts.append(f"🕒 до {time_str}")
+                        meta_str = " | ".join(meta_parts)
+
+                        escaped_title = html.escape(task.title)
+                        text = (
+                            "🚨 <b>Увага! Дедлайн через 10 хвилин!</b>\n\n"
+                            "Час завершувати завдання:\n"
+                            f"• <b>{escaped_title}</b> — {meta_str}"
+                        )
+                        keyboard = get_deadline_keyboard(
+                            task_id=task.id,
+                            user_id=task.user_id,
+                            snooze_minutes=15,
+                        )
+
+                        await bot.send_message(
+                            chat_id=task.user_id,
+                            text=text,
+                            reply_markup=keyboard,
+                            parse_mode="HTML",
+                        )
+
+                        task.reminder_sent_10m = True
+                        task.reminder_sent_1h = True
+                        await session.commit()
+                        stats["reminders_10m_sent"] += 1
+
+                # 1-hour proximity check (-1h)
+                elif 600 < delta_sec <= 3600:
+                    if not task.reminder_sent_1h:
+                        user = await session.get(User, task.user_id)
+                        user_tz = (
+                            ZoneInfo(user.timezone)
+                            if user and user.timezone
+                            else ZoneInfo("Europe/Kyiv")
+                        )
+                        deadline_local = deadline_utc.astimezone(user_tz)
+                        time_str = deadline_local.strftime("%H:%M")
+
+                        meta_parts: list[str] = []
+                        if task.priority == TaskPriority.high:
+                            meta_parts.append("⚠️ Високий")
+                        elif task.priority == TaskPriority.low:
+                            meta_parts.append("💤 Низький")
+                        else:
+                            meta_parts.append("⚡ Середній")
+
+                        if task.tag:
+                            clean_tag = task.tag.lstrip("#")
+                            meta_parts.append(f"🏷️ #{clean_tag}")
+
+                        meta_parts.append(f"🕒 до {time_str}")
+                        meta_str = " | ".join(meta_parts)
+
+                        escaped_title = html.escape(task.title)
+                        text = (
+                            "⏳ <b>Нагадування про дедлайн!</b>\n\n"
+                            "Залишилася 1 година до завершення:\n"
+                            f"• <b>{escaped_title}</b> — {meta_str}"
+                        )
+                        keyboard = get_deadline_keyboard(
+                            task_id=task.id,
+                            user_id=task.user_id,
+                            snooze_minutes=15,
+                        )
+
+                        await bot.send_message(
+                            chat_id=task.user_id,
+                            text=text,
+                            reply_markup=keyboard,
+                            parse_mode="HTML",
+                        )
+
+                        task.reminder_sent_1h = True
+                        await session.commit()
+                        stats["reminders_1h_sent"] += 1
+
+            except TelegramForbiddenError as e:
+                logger.warning("User %s has blocked the bot: %s", task.user_id, e)
+                try:
+                    task.reminder_sent_1h = True
+                    task.reminder_sent_10m = True
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+            except TelegramAPIError as e:
+                err_msg = str(e).lower()
+                if "blocked" in err_msg or "forbidden" in err_msg or "deactivated" in err_msg:
+                    logger.warning(
+                        "User %s has blocked or deactivated the bot: %s",
+                        task.user_id,
+                        e,
+                    )
+                    try:
+                        task.reminder_sent_1h = True
+                        task.reminder_sent_10m = True
+                        await session.commit()
+                    except Exception:
+                        await session.rollback()
+                else:
+                    logger.exception(
+                        "Telegram API error dispatching deadline reminder for task %s (user %s): %s",
+                        task.id,
+                        task.user_id,
+                        e,
+                    )
+                    await session.rollback()
+                    stats["errors"] += 1
+            except Exception:
+                logger.exception(
+                    "Unexpected error dispatching deadline reminder for task %s (user %s)",
+                    task.id,
+                    task.user_id,
+                )
+                await session.rollback()
                 stats["errors"] += 1
 
     return stats
