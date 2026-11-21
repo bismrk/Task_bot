@@ -1,9 +1,9 @@
 """User database model."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, DateTime, String
+from sqlalchemy import BigInteger, Date, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base
@@ -36,6 +36,16 @@ class User(Base):
         DateTime(timezone=True),
         nullable=False,
         default=utc_now,
+    )
+    last_midnight_review_date: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True,
+        default=None,
+    )
+    last_morning_push_date: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True,
+        default=None,
     )
 
     tasks: Mapped[list["Task"]] = relationship(
