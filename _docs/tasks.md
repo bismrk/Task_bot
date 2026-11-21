@@ -920,8 +920,108 @@ Build the interactive Today Checklist in the Telegram Mini App featuring task ca
 
 
 ## 13. Timezone-Aware Background Scheduler (00:00 & 09:00 Triggers)
-Goal: Implement APScheduler background jobs that trigger midnight reviews and morning pushes per user timezone.
-Description: Configure `APScheduler` with an async job runner that checks all user timezones periodically and fires events when a user reaches 00:00 or 09:00 local time. Dispatch the 00:00 rollover review dialogue and the 09:00 morning push with an inline button to launch the Telegram Mini App. Ensure job execution is idempotent to prevent duplicate messages across application restarts.
+
+### Goal
+
+Implement an APScheduler background service using `AsyncIOScheduler` that runs periodic minute-by-minute checks across all registered users to trigger timezone-aware 00:00 midnight rollover review dialogues and 09:00 morning digest pushes with Telegram Mini App launch buttons, complete with restart-resilient database idempotency tracking, robust per-user exception isolation, graceful Telegram error handling (including blocked bots), and 100% automated integration test coverage.
+
+### Acceptance criteria
+
+- [ ] `src/models/user.py` updates the `User` model with `last_midnight_review_date: Mapped[date | None] = mapped_column(Date, nullable=True, default=None)` to persist the calendar date of the last triggered 00:00 review (REQ-SCH-01, REQ-NFR-03).
+- [ ] `src/models/user.py` updates the `User` model with `last_morning_push_date: Mapped[date | None] = mapped_column(Date, nullable=True, default=None)` to persist the calendar date of the last triggered 09:00 morning push (REQ-SCH-02, REQ-NFR-03).
+- [ ] Both fields default to `None` for newly created users and support existing user instances without breaking database migrations or existing queries.
+- [ ] `src/scheduler/jobs.py` defines async function `process_user_midnight_rollover(bot: Bot, session: AsyncSession, user: User, now_dt: datetime | None = None) -> bool` (REQ-SCH-01).
+- [ ] `process_user_midnight_rollover` computes the user's local datetime using `get_user_local_time(user, now_dt)`.
+- [ ] `process_user_midnight_rollover` checks if the user's local time is in the 00:00 window (`local_time.hour == 0 and local_time.minute == 0`); returns `False` if not in the window.
+- [ ] Idempotency Check: if `user.last_midnight_review_date == local_time.date()`, `process_user_midnight_rollover` returns `False` immediately without sending any messages or re-evaluating tasks (REQ-SCH-01, REQ-NFR-03).
+- [ ] When eligible (00:00 and not yet triggered today):
+  - Calls `send_midnight_rollover_dialogue(bot=bot, session=session, user=user, reference_date=local_time.date())` (REQ-SCH-01).
+  - When the user has zero overdue tasks, sends the congratulatory message (`✨ Всі вчорашні завдання виконано!...`) without inline keyboards (REQ-SCH-01).
+  - When the user has one or more overdue tasks, sends the batch overview control message with `get_batch_rollover_keyboard` and individual task messages with `get_task_rollover_keyboard` (REQ-SCH-01).
+  - Updates `user.last_midnight_review_date = local_time.date()` and commits the database transaction.
+  - Returns `True`.
+- [ ] `src/scheduler/jobs.py` defines async function `process_user_morning_push(bot: Bot, session: AsyncSession, user: User, webapp_url: str | None = None, now_dt: datetime | None = None) -> bool` (REQ-SCH-02).
+- [ ] `process_user_morning_push` computes the user's local datetime using `get_user_local_time(user, now_dt)`.
+- [ ] `process_user_morning_push` checks if the user's local time is in the 09:00 window (`local_time.hour == 9 and local_time.minute == 0`); returns `False` if not in the window.
+- [ ] Idempotency Check: if `user.last_morning_push_date == local_time.date()`, `process_user_morning_push` returns `False` immediately without sending any messages (REQ-SCH-02, REQ-NFR-03).
+- [ ] When eligible (09:00 and not yet triggered today):
+  - Calls `ensure_recurring_tasks_for_date(session=session, user_id=user.telegram_id, target_date=local_time.date())` so any daily or matching weekday recurring tasks are generated before digest creation (REQ-TMA-02).
+  - Queries tasks for today using `get_tasks_for_date(session=session, user_id=user.telegram_id, target_date=local_time.date())`.
+  - Filters pending tasks where `task.status == TaskStatus.todo`.
+  - Generates inline keyboard with `[🚀 Відкрити план]` button using `get_start_keyboard(webapp_url)` (attaching `WebAppInfo(url=webapp_url)` when `webapp_url` is configured, or callback `open_plan` fallback) complying with `_docs/design-system.md` (REQ-SCH-02).
+  - When pending tasks exist (`todo_tasks` is not empty):
+    - Formats HTML morning digest message with header `📋 <b>План на сьогодні ({formatted_date}):</b>`, task count `У вас {count} запланованих завдань на сьогодні:`, and preview bulleted items with task titles, priority badges (`⚠️ Високий`, `⚡ Середній`, `💤 Низький`), category tags (`🏷️ #{tag}`), and deadlines (`🕒 до {time}`) per `_docs/design-system.md`.
+    - Sends message to `chat_id=user.telegram_id` with the formatted digest text and the `[🚀 Відкрити план]` keyboard.
+  - When zero pending tasks exist (`todo_tasks` is empty):
+    - Formats HTML friendly morning message: `☀️ <b>Доброго ранку!</b>\n\nНа сьогодні у вас немає запланованих завдань.\nВідпочиньте або надиктуйте нові плани на день 🚀` per `_docs/design-system.md`.
+    - Sends message to `chat_id=user.telegram_id` with the friendly text and the `[🚀 Відкрити план]` keyboard.
+  - Updates `user.last_morning_push_date = local_time.date()` and commits the database transaction.
+  - Returns `True`.
+- [ ] `src/scheduler/jobs.py` defines async function `run_timezone_checks(bot: Bot, sessionmaker: async_sessionmaker[AsyncSession], webapp_url: str | None = None, reference_time: datetime | None = None) -> dict[str, int]`.
+- [ ] `run_timezone_checks` opens an async database session using `sessionmaker()`, queries all registered users via `select(User)`, and iterates over each user.
+- [ ] Exception Isolation per User: processing for each individual user is wrapped in a dedicated `try...except` block so that a failure or exception for one user never prevents subsequent users from being processed.
+- [ ] Blocked Bot Handling: catches `TelegramForbiddenError` (or `TelegramAPIError` where the bot was blocked or deleted by the user), logs a warning (`User {telegram_id} has blocked the bot`), marks the trigger date for that user to avoid repeated attempts, and continues to the next user without crashing the job.
+- [ ] General Exception Handling: catches generic exceptions during a user's execution, logs the error and stack trace via `logger.exception(...)`, rolls back any pending transaction on the session, and continues processing the next user.
+- [ ] `run_timezone_checks` returns a dictionary of counters: `{"midnight_triggered": int, "morning_triggered": int, "errors": int}`.
+- [ ] `src/scheduler/manager.py` defines `create_scheduler() -> AsyncIOScheduler` initializing `AsyncIOScheduler(timezone="UTC")`.
+- [ ] `src/scheduler/manager.py` defines `setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot, sessionmaker: async_sessionmaker[AsyncSession], webapp_url: str | None = None) -> AsyncIOScheduler`.
+- [ ] `setup_scheduler` registers a periodic job executing `run_timezone_checks(bot, sessionmaker, webapp_url)` scheduled to run every minute (e.g. `CronTrigger(second=0)` or `IntervalTrigger(minutes=1)`).
+- [ ] The registered job is configured with `id="timezone_checks"`, `name="Timezone-Aware Background Checks"`, `replace_existing=True`, `max_instances=1`, and `coalesce=True`.
+- [ ] `src/scheduler/manager.py` defines `start_scheduler(scheduler: AsyncIOScheduler) -> None` that starts the scheduler if it is not already running.
+- [ ] `src/scheduler/manager.py` defines `stop_scheduler(scheduler: AsyncIOScheduler, wait: bool = False) -> None` that cleanly shuts down the scheduler if it is running.
+- [ ] `src/scheduler/__init__.py` imports and exposes `create_scheduler`, `setup_scheduler`, `start_scheduler`, `stop_scheduler`, `run_timezone_checks`, `process_user_midnight_rollover`, and `process_user_morning_push`.
+- [ ] `tests/integration/test_scheduler.py` provides automated integration tests using the in-memory SQLite fixture `db_session` / `sessionmaker` and 100% mocked Telegram `Bot` via `unittest.mock.AsyncMock` with zero real network calls per `_docs/testing-guidelines.md`.
+- [ ] Automated tests verify `process_user_midnight_rollover` at local 00:00:
+  - User with overdue tasks receives batch overview message and individual task messages with rollover keyboards, and `user.last_midnight_review_date` is updated (REQ-SCH-01).
+  - User with 0 overdue tasks receives congratulatory message without keyboard, and `user.last_midnight_review_date` is updated (REQ-SCH-01).
+  - When local time is not 00:00 (e.g. 23:59 or 00:01), no message is sent and `last_midnight_review_date` is unchanged.
+- [ ] Automated tests verify `process_user_morning_push` at local 09:00:
+  - Calls `ensure_recurring_tasks_for_date`, populating recurring tasks for today before digest creation (REQ-TMA-02).
+  - User with pending tasks receives morning digest with task count, formatted task items, and `[🚀 Відкрити план]` button, and `user.last_morning_push_date` is updated (REQ-SCH-02).
+  - User with 0 pending tasks receives friendly morning message with `[🚀 Відкрити план]` button, and `user.last_morning_push_date` is updated (REQ-SCH-02).
+  - When local time is not 09:00, no message is sent and `last_morning_push_date` is unchanged.
+- [ ] Automated tests verify timezone independence: multiple users configured in different timezones (e.g. `Asia/Tokyo`, `Europe/Kyiv`, `America/New_York`) are evaluated simultaneously, and triggers execute strictly for the user whose local clock matches 00:00 or 09:00.
+- [ ] Automated tests verify restart-resilient idempotency (REQ-NFR-03): executing `run_timezone_checks` multiple times in succession or after an application restart during the same minute does not dispatch duplicate messages once `last_midnight_review_date` or `last_morning_push_date` matches today's date.
+- [ ] Automated tests verify Telegram exception handling: when `bot.send_message` raises `TelegramForbiddenError` (bot blocked by user), the error is caught and logged, the trigger flag is recorded, and the process completes cleanly without an unhandled exception.
+- [ ] Automated tests verify per-user exception isolation: if an unexpected exception occurs while processing user 1, user 2 is still processed successfully and the error counter is incremented.
+- [ ] Automated tests verify scheduler lifecycle: `create_scheduler`, `setup_scheduler`, job configuration parameters, `start_scheduler`, and `stop_scheduler`.
+- [ ] All test functions contain docstrings referencing requirement IDs (`REQ-SCH-01`, `REQ-SCH-02`, `REQ-TMA-02`, `REQ-NFR-02`, `REQ-NFR-03`).
+- [ ] Running `uv run pytest tests/integration/test_scheduler.py` passes with 0 errors and 0 failures.
+- [ ] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- Proactive deadline notification reminders (-1 hour and -10 minutes proximity checks with `reminder_sent_1h` and `reminder_sent_10m`), moved to #14
+- Mini App calendar tab, monthly task counts, and date activity indicator endpoints (`GET /api/tasks/calendar-summary`), moved to #15
+- Mini App productivity dashboard, completion rate charts, and daily streaks (`GET /api/tasks/analytics`), moved to #16
+- User `/settings` command handler and timezone configuration UI (`PATCH /api/settings/timezone`), moved to #17
+- Production multi-process startup runner, unified Dockerfile, and end-to-end deployment verification (`main.py`), moved to #18
+
+### Constraints
+
+- Files this should stay inside:
+  - `src/models/user.py`
+  - `src/scheduler/jobs.py`
+  - `src/scheduler/manager.py`
+  - `src/scheduler/__init__.py`
+  - `tests/integration/test_scheduler.py`
+- Libraries to use:
+  - `apscheduler` (`from apscheduler.schedulers.asyncio import AsyncIOScheduler`, `from apscheduler.triggers.cron import CronTrigger` or `from apscheduler.triggers.interval import IntervalTrigger`)
+  - `aiogram>=3.0` (`Bot`, `exceptions.TelegramForbiddenError`, `exceptions.TelegramAPIError`, `types.InlineKeyboardMarkup`, `types.InlineKeyboardButton`, `types.WebAppInfo`)
+  - `sqlalchemy>=2.0` (`select`, `AsyncSession`, `async_sessionmaker`, `Date`)
+  - Python standard library (`datetime`, `zoneinfo.ZoneInfo`, `logging`, `unittest.mock`)
+  - `pytest`, `pytest-asyncio`
+- Do not add new dependencies to `pyproject.toml` without explicit permission per `Agents.md` (`apscheduler` is already an existing dependency in `pyproject.toml`)
+- Reuse existing service functions and handlers:
+  - `send_midnight_rollover_dialogue` in `src/bot/handlers/rollover.py`
+  - `get_start_keyboard` in `src/bot/keyboards/start.py`
+  - `get_user_local_time` in `src/services/user_service.py`
+  - `get_tasks_for_date` and `ensure_recurring_tasks_for_date` in `src/services/task_service.py`
+- Follow testing conventions in `_docs/testing-guidelines.md` (isolated in-memory SQLite fixture, `@pytest.mark.asyncio`, zero real network requests to Telegram, requirement ID docstrings)
+- Follow formatting and design guidelines in `_docs/design-system.md` (semantic emojis, clean HTML parse mode, `[🚀 Відкрити план]`, max 2 buttons per row)
+- Strictly enforce tenant isolation per `REQ-NFR-02`
+- Follow modular architectural structure defined in `_docs/schema.md`
+- Do not write implementation code or modify code files in `src/` or `tests/` in this task
 
 ## 14. Deadline Notification Reminders (-1 Hour & -10 Minutes)
 Goal: Implement background reminders for upcoming task deadlines.
