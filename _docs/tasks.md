@@ -1532,5 +1532,88 @@ Implement comprehensive user settings interfaces in both the Telegram bot and Te
   - Do not write implementation code or modify code files in `src/`, `frontend/`, or `tests/`.
 
 ## 18. End-to-End Integration, Packaging, and Deployment Verification
-Goal: Connect all components into a unified runnable application with documentation and deployment configuration.
-Description: Configure a unified startup script or Docker Compose setup that runs the FastAPI backend (serving static Mini App assets), the aiogram bot, and the APScheduler instance. Verify the full user journey from voice message ingestion to Mini App checklist interaction and scheduled notification delivery. Update documentation with step-by-step setup, environment variable guidance, and local testing instructions.
+
+### Goal
+
+Connect all backend and frontend components into a production-ready, unified runnable application (`main.py`) that concurrently orchestrates the FastAPI server (serving static Mini App assets), the aiogram Telegram bot polling, and the APScheduler background service with robust lifecycle management and graceful shutdown, packaged via a multi-stage `Dockerfile` and `docker-compose.yml`, accompanied by complete deployment documentation (`README.md`), updated environment configuration (`.env.example`), and 100% automated integration test coverage.
+
+### Acceptance criteria
+
+- [ ] `main.py` serves as the single unified entry point for running the complete application stack (FastAPI server, aiogram bot polling, and APScheduler background service).
+- [ ] `main.py` loads application configuration via `get_settings()` from `src.core.config`.
+- [ ] `main.py` defines startup initialization functions (e.g. `setup_application()` or `init_app_components()`):
+  - Asynchronously initializes database tables via `init_db(engine)` from `src.core.database` (REQ-NFR-01, REQ-NFR-03).
+  - Initializes the bot instance via `create_bot(token=settings.BOT_TOKEN)` from `src.bot.dispatcher`.
+  - Initializes the dispatcher via `create_dispatcher(sessionmaker=async_session_maker, webapp_url=settings.WEBAPP_URL)` from `src.bot.dispatcher`.
+  - Initializes background scheduler via `create_scheduler()`, registers periodic jobs via `setup_scheduler(scheduler, bot, async_session_maker, settings.WEBAPP_URL)`, and starts it via `start_scheduler(scheduler)` from `src.scheduler.manager` (REQ-SCH-01, REQ-SCH-02, REQ-SCH-03).
+  - Initializes FastAPI application via `create_app(settings=settings, sessionmaker=async_session_maker, frontend_dist=DEFAULT_FRONTEND_DIST)` from `src.api.app` (REQ-API-01, REQ-API-02).
+- [ ] `main.py` configures and instantiates `uvicorn.Server(config=uvicorn.Config(app=app, host=settings.HOST, port=settings.PORT, log_level="info" if not settings.DEBUG else "debug"))`.
+- [ ] `main.py` runs the FastAPI server (`server.serve()`) and Telegram Bot polling (`dp.start_polling(bot)`) concurrently within the same `asyncio` event loop using `asyncio.gather` or structured tasks (`asyncio.create_task` / `asyncio.TaskGroup`).
+- [ ] `main.py` implements graceful shutdown lifecycle:
+  - Catches `KeyboardInterrupt`, `asyncio.CancelledError`, and OS signals (`SIGINT`, `SIGTERM` with cross-platform compatibility checking `hasattr(signal, "SIGTERM")` and `sys.platform != "win32"` to safely operate on Windows).
+  - Stops the background scheduler cleanly via `stop_scheduler(scheduler, wait=False)` ensuring no orphaned background jobs continue running.
+  - Stops bot polling via `dp.stop_polling()` and closes the bot HTTP session via `await bot.session.close()`.
+  - Signals Uvicorn server to exit cleanly via setting `server.should_exit = True`.
+  - Closes and disposes the SQLAlchemy async database engine cleanly via `await engine.dispose()`.
+  - Exits with returncode 0 on normal termination.
+- [ ] When `WEBAPP_URL` is omitted or None in settings, `main.py` logs an informational notice and starts up successfully with bot polling and scheduler functioning normally, falling back to local Mini App serving at `http://{HOST}:{PORT}`.
+- [ ] If database initialization or configuration loading fails at startup, `main.py` logs a descriptive error and exits cleanly without hanging background threads.
+- [ ] Multi-stage `Dockerfile` is created in the repository root:
+  - Stage 1 (`frontend-builder`): Uses Node.js LTS base image (e.g. `node:20-alpine`), copies `frontend/package.json` and `frontend/package-lock.json`, installs dependencies via `npm ci` (or `npm install`), copies source, and builds frontend via `npm run build` to `/app/frontend/dist`.
+  - Stage 2 (`python-runtime`): Uses Python 3.11+ slim base image, sets `PYTHONUNBUFFERED=1` and `UV_SYSTEM_PYTHON=1`, installs `uv`, installs dependencies via `uv sync --frozen --no-dev`, copies backend code and built frontend dist, exposes port 8000, and runs `main.py` via `CMD ["uv", "run", "python", "main.py"]`.
+- [ ] `docker-compose.yml` is created in the repository root:
+  - Defines service `app` (or `tasks-bot`) building from `Dockerfile`.
+  - Maps port `${PORT:-8000}:8000`.
+  - Configures volume mount for persistent SQLite database storage (e.g. `./data:/app/data` with `DATABASE_URL=sqlite+aiosqlite:////app/data/tasks.db` or persistent volume).
+  - Loads environment variables from `.env` with fallback defaults.
+  - Sets restart policy `restart: unless-stopped`.
+- [ ] `.dockerignore` is created in the repository root excluding `node_modules`, `frontend/node_modules`, `.venv`, `.git`, `.pytest_cache`, `__pycache__`, `*.pyc`, `*.pyo`, `tests/`, `_docs/`, `.env`, `tasks.db`, and `tasks.db-*`.
+- [ ] `.env.example` is updated in the repository root documenting all configuration variables (`BOT_TOKEN`, `GEMINI_API_KEY`, `DATABASE_URL`, `WEBAPP_URL`, `HOST`, `PORT`, `DEBUG`).
+- [ ] `README.md` is created in the repository root providing comprehensive documentation:
+  - Project architecture overview and tech stack (`aiogram 3`, `FastAPI`, `APScheduler`, `SQLAlchemy 2.0`, `React 18`, `uv`).
+  - Prerequisites (Python 3.11+, uv, Node.js 18+, Docker).
+  - Local setup and running instructions (both manual with `uv` + `npm` and Docker Compose).
+  - BotFather and Telegram Mini App setup guide (`BOT_TOKEN`, `WEBAPP_URL`).
+  - Complete environment variables reference table.
+  - Testing and verification guide (`uv run pytest`, `npm run typecheck`, `npm run build`).
+- [ ] `tests/integration/test_main_runner.py` is created and contains automated tests:
+  - Tests application factory wiring: verifies `main.py` functions can initialize and configure bot, dispatcher, scheduler, database, and FastAPI app with mock settings (REQ-NFR-03).
+  - Tests concurrent execution: verifies server and bot polling tasks run concurrently without blocking each other.
+  - Tests graceful shutdown lifecycle: verifies scheduler is stopped, bot polling stopped, bot session closed, uvicorn signaled, and database engine disposed cleanly (REQ-NFR-03).
+  - Tests missing `BOT_TOKEN` validation: verifies error exit when required bot token is missing.
+- [ ] All tests in `tests/integration/test_main_runner.py` make 0 real network calls to Telegram Bot API or Google Gemini API per `_docs/testing-guidelines.md`.
+- [ ] All test functions contain docstrings referencing requirement IDs (`REQ-NFR-03`, `REQ-NFR-01`).
+- [ ] Running `uv run pytest tests/integration/test_main_runner.py` passes with exit code 0.
+- [ ] Complete test suite `uv run pytest` passes 100% with 0 errors and 0 failures.
+
+### Out of scope
+
+- User-customizable check-in hours (custom morning push / evening review times) and configurable reminder intervals in database and scheduler, moved to #19
+- Cloud hosting CI/CD deployment pipelines (GitHub Actions deployment workflows to AWS/GCP/DigitalOcean), moved to future backlog
+- Kubernetes Helm charts, Kubernetes manifests, and multi-pod high-availability clustering, moved to future backlog
+- Automated SSL certificate provisioning and reverse proxy / ingress controller (e.g. Traefik, Caddy, Nginx SSL termination), moved to future backlog
+- Webhook-based Telegram update delivery mode (application runs in long-polling mode for simplified deployment), moved to future backlog
+
+### Constraints
+
+- Files this should stay inside:
+  - `main.py`
+  - `Dockerfile`
+  - `docker-compose.yml`
+  - `.dockerignore`
+  - `.env.example`
+  - `README.md`
+  - `tests/integration/test_main_runner.py`
+- Libraries to use:
+  - Python: `uvicorn`, `aiogram 3`, `fastapi`, `apscheduler`, `sqlalchemy 2.0`, `aiosqlite`, `pydantic-settings`, `pytest`, `pytest-asyncio`, `unittest.mock` (`AsyncMock`, `MagicMock`, `patch`)
+  - Node / Frontend: `npm`, `vite`
+  - DevOps: Docker, Docker Compose
+- Dependencies:
+  - Python dependencies are strictly defined in `pyproject.toml` — do not add new dependencies without explicit permission per `Agents.md`.
+  - `uvicorn`, `fastapi`, `aiogram`, `apscheduler`, `sqlalchemy`, and `aiosqlite` are already installed and listed in `pyproject.toml`.
+- Guidelines:
+  - Follow testing conventions in `_docs/testing-guidelines.md`: isolated in-memory SQLite fixture, `@pytest.mark.asyncio`, zero real network calls to Telegram or Gemini API, requirement ID docstrings (`REQ-NFR-03`, `REQ-NFR-01`).
+  - Cross-platform signal handling: do not call `loop.add_signal_handler` on Windows (ProactorEventLoop) without platform guards (`if sys.platform != "win32"`).
+  - Graceful shutdown handlers must safely handle task cancellation without unhandled exceptions or dangling engine connections (REQ-NFR-03).
+  - Follow modular architecture defined in `_docs/schema.md`.
+  - Do not write implementation code or modify code files in `src/`, `frontend/`, or `tests/`.
