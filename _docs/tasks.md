@@ -1024,8 +1024,141 @@ Implement an APScheduler background service using `AsyncIOScheduler` that runs p
 - Do not write implementation code or modify code files in `src/` or `tests/` in this task
 
 ## 14. Deadline Notification Reminders (-1 Hour & -10 Minutes)
-Goal: Implement background reminders for upcoming task deadlines.
-Description: Create a scheduled periodic task in `APScheduler` that queries for pending tasks whose deadlines fall within 1 hour or 10 minutes from the current time. Dispatch proactive Telegram notification messages to the respective user with inline buttons to mark the task completed or snooze the reminder. Persist reminder dispatch flags in the database to prevent duplicate alerts.
+
+### Goal
+
+Implement an automated background deadline monitoring service using APScheduler that periodically scans for pending tasks nearing their deadlines (at -1 hour and -10 minute thresholds), dispatches proactive Telegram notification messages with actionable inline buttons (`[✅ Виконано]` and `[⏰ +15 хв]`), handles completion and snooze callbacks with strict tenant isolation, guarantees database idempotency via persisted reminder flags, ensures per-task and per-user exception isolation, and is verified with 100% automated integration test coverage.
+
+### Acceptance criteria
+
+- [ ] `src/scheduler/jobs.py` defines async function `run_deadline_checks(bot: Bot, sessionmaker: async_sessionmaker[AsyncSession], now_dt: datetime | None = None) -> dict[str, int]` (REQ-SCH-03).
+- [ ] `run_deadline_checks` opens an async database session using `sessionmaker()` and queries all tasks where `status == TaskStatus.todo` and `deadline_at is not None`.
+- [ ] If `now_dt` is not provided, it defaults to the current UTC datetime (`datetime.now(timezone.utc)`).
+- [ ] For each candidate task, `delta_sec = (task.deadline_at - now_dt).total_seconds()` is computed with both datetimes normalized to timezone-aware UTC.
+- [ ] **10-minute proximity check (-10m)**:
+  - If `0 < delta_sec <= 600` and `not task.reminder_sent_10m`:
+    - Sends 10-minute warning notification message to `chat_id=task.user_id` with inline keyboard `[✅ Виконано]` and `[⏰ +15 хв]` (REQ-SCH-03).
+    - Sets `task.reminder_sent_10m = True` and `task.reminder_sent_1h = True` (to ensure 1h notification is not redundantly dispatched if task was created or scheduled directly within the 10m window).
+    - Commits the transaction to the database.
+    - Increments the `reminders_10m_sent` counter.
+- [ ] **1-hour proximity check (-1h)**:
+  - If `600 < delta_sec <= 3600` (or `0 < delta_sec <= 3600`) and `not task.reminder_sent_1h`:
+    - Sends 1-hour advance reminder notification message to `chat_id=task.user_id` with inline keyboard `[✅ Виконано]` and `[⏰ +15 хв]` (REQ-SCH-03).
+    - Sets `task.reminder_sent_1h = True`.
+    - Commits the transaction to the database.
+    - Increments the `reminders_1h_sent` counter.
+- [ ] **Past deadlines (`delta_sec <= 0`)**:
+  - Tasks whose deadlines have already passed (`delta_sec <= 0`) are ignored and do not trigger notifications.
+- [ ] **Completed / Canceled tasks**:
+  - Tasks with status `TaskStatus.done` or `TaskStatus.canceled` are excluded from reminder processing and receive no alerts (REQ-SCH-03).
+- [ ] **Tasks without deadline (`deadline_at is None`)**:
+  - Tasks without a deadline are excluded from reminder checks.
+- [ ] **Restart-Resilient Idempotency (REQ-NFR-03)**:
+  - Repeating `run_deadline_checks` during the same minute or after an application restart does not dispatch duplicate reminders once `task.reminder_sent_1h` or `task.reminder_sent_10m` is set to `True`.
+- [ ] **Per-Task Exception Isolation (REQ-NFR-02)**:
+  - Processing for each task is wrapped in a dedicated `try...except` block so that a failure or exception while dispatching to one user/task never halts or impacts notifications for other tasks.
+- [ ] **Telegram Exception & Blocked Bot Handling**:
+  - Catches `TelegramForbiddenError` (or `TelegramAPIError` where the bot was blocked or deactivated by the user), logs a warning (`User {user_id} has blocked the bot`), marks the reminder flags as sent to prevent repeated retry attempts on subsequent checks, and continues cleanly.
+  - Catches general exceptions, logs the error via `logger.exception(...)`, rolls back the database session (`await session.rollback()`), and increments the `errors` counter.
+- [ ] `run_deadline_checks` returns a statistics dictionary: `{"reminders_1h_sent": int, "reminders_10m_sent": int, "errors": int}`.
+- [ ] `src/bot/keyboards/deadline.py` defines `DeadlineCallback(CallbackData, prefix="deadline")` with fields `action: str`, `task_id: int`, `user_id: int`, and `minutes: int = 15`.
+- [ ] `src/bot/keyboards/deadline.py` defines `get_deadline_keyboard(task_id: int, user_id: int, snooze_minutes: int = 15) -> InlineKeyboardMarkup` adhering to `_docs/design-system.md` (max 2 buttons per row):
+  - Row 1: `[✅ Виконано]` (`action="done"`) and `[⏰ +15 хв]` (`action="snooze"`, `minutes=snooze_minutes`).
+- [ ] Notification message formatting adheres to `_docs/design-system.md`:
+  - 1-Hour Reminder HTML formatting:
+    `⏳ <b>Нагадування про дедлайн!</b>\n\nЗалишилася 1 година до завершення:\n• <b>{task.title}</b> — {priority_badge} | {tag_badge} | 🕒 до {time}`
+  - 10-Minute Reminder HTML formatting:
+    `🚨 <b>Увага! Дедлайн через 10 хвилин!</b>\n\nЧас завершувати завдання:\n• <b>{task.title}</b> — {priority_badge} | {tag_badge} | 🕒 до {time}`
+  - Priority badge: `⚠️ Високий` (high), `⚡ Середній` (medium), `💤 Низький` (low).
+  - Category tag badge: `🏷️ #{tag}` if tag is set, or omitted if `None`.
+  - Deadline time formatted in the user's local timezone (or HH:MM format).
+- [ ] `src/bot/handlers/deadline.py` defines `deadline_router = Router(name="deadline")` (or `router`).
+- [ ] `deadline_router` handles `DeadlineCallback.filter()` queries with strict tenant isolation (REQ-NFR-02):
+  - If `callback_query.from_user.id != callback_data.user_id`: rejects callback with alert `"⚠️ Ви не можете керувати завданнями іншого користувача."` (`show_alert=True`) and leaves database unchanged.
+- [ ] If the referenced task does not exist or has been deleted: alerts user `"⚠️ Завдання не знайдено або вже видалено."` (`show_alert=True`), removes inline keyboard, and aborts.
+- [ ] **Done Callback (`action == "done"`)**:
+  - If task is already `done`, alerts user `"⚠️ Завдання вже виконано."`, removes keyboard, and answers callback.
+  - Updates task status to `TaskStatus.done` and commits transaction (REQ-TSK-02).
+  - Updates the Telegram message to confirm completion: displays strikethrough title `<s>{task.title}</s>` and celebratory confirmation `✅ <b>Завдання виконано!</b>`, and removes inline keyboard (`reply_markup=None`) per `_docs/design-system.md`.
+  - Answers callback query with `"✅ Виконано!"`.
+- [ ] **Snooze Callback (`action == "snooze"`)**:
+  - If task is already `done`, alerts user `"⚠️ Завдання вже виконано."`, removes keyboard, and answers callback.
+  - Extends `task.deadline_at` by `callback_data.minutes` (e.g. +15 minutes).
+  - Updates `task.target_date = task.deadline_at.date()` if snooze extends the deadline into the next calendar date.
+  - Resets reminder flags: sets `task.reminder_sent_10m = False`. If the new deadline is > 60 minutes away from current time, also sets `task.reminder_sent_1h = False`.
+  - Commits transaction to database.
+  - Updates Telegram message text to confirm extension: e.g. `⏰ <b>Дедлайн відкладено на +{minutes} хв!</b>\n\n• <b>{task.title}</b> — новий дедлайн: 🕒 {new_time}`, and updates inline keyboard.
+  - Answers callback query with `"⏰ Відкладено на {minutes} хв"`.
+- [ ] `src/bot/handlers/__init__.py` exposes `deadline_router`.
+- [ ] `src/bot/keyboards/__init__.py` exposes `DeadlineCallback` and `get_deadline_keyboard`.
+- [ ] `src/bot/dispatcher.py` (`create_dispatcher`) registers `deadline_router`.
+- [ ] `src/scheduler/manager.py` updates `setup_scheduler`:
+  - Registers periodic job for `run_deadline_checks(bot, sessionmaker)`.
+  - Configures job with `id="deadline_checks"`, `name="Deadline Proximity Checks"`, `replace_existing=True`, `max_instances=1`, and `coalesce=True`.
+  - Scheduled every minute using `CronTrigger(second=30, timezone="UTC")` (or `IntervalTrigger(minutes=1)`), staggered from the 00-second timezone checks.
+- [ ] `src/scheduler/__init__.py` exposes `run_deadline_checks`.
+- [ ] `tests/integration/test_deadline_reminders.py` provides automated integration tests using the in-memory SQLite fixture `db_session` / `session_factory` and mocked Telegram `Bot` via `unittest.mock.AsyncMock` with zero real network calls per `_docs/testing-guidelines.md`.
+- [ ] Automated tests verify 1-hour proximity trigger:
+  - Task with deadline in 50 minutes, `status == todo`, and `reminder_sent_1h == False` dispatches 1h notification message, sets `reminder_sent_1h = True`, and leaves `reminder_sent_10m = False` (REQ-SCH-03).
+- [ ] Automated tests verify 10-minute proximity trigger:
+  - Task with deadline in 8 minutes, `status == todo`, and `reminder_sent_10m == False` dispatches 10m notification message, sets `reminder_sent_10m = True`, and sets `reminder_sent_1h = True` (REQ-SCH-03).
+- [ ] Automated tests verify edge cases:
+  - Task with deadline > 1 hour away (e.g. 75 minutes) does not dispatch notification; flags remain `False`.
+  - Task with deadline in the past (`delta_sec <= 0`) does not dispatch notification; flags remain unchanged.
+  - Task with status `done` or `canceled` does not dispatch notification even if deadline is in 5 minutes (REQ-SCH-03).
+  - Task with `deadline_at is None` does not dispatch notification.
+- [ ] Automated tests verify idempotency:
+  - Successive calls to `run_deadline_checks` do not dispatch duplicate notifications once flags are `True` (REQ-SCH-03, REQ-NFR-03).
+- [ ] Automated tests verify Done callback:
+  - Tapping `[✅ Виконано]` updates task status to `done` in DB, edits Telegram message to crossed-out/confirmed state, and removes keyboard (REQ-TSK-02).
+- [ ] Automated tests verify Snooze callback:
+  - Tapping `[⏰ +15 хв]` extends `deadline_at` by 15 minutes, resets `reminder_sent_10m = False`, and edits Telegram message confirming extension (REQ-SCH-03).
+- [ ] Automated tests verify tenant isolation:
+  - Callback from an unauthorized user (`from_user.id != task.user_id`) produces warning alert and does not alter task state or deadline (REQ-NFR-02).
+- [ ] Automated tests verify error isolation and blocked bot:
+  - `TelegramForbiddenError` during dispatch is caught and logged, reminder flags are marked to prevent retry storms, and other tasks/users continue processing cleanly.
+  - Unexpected exception on task 1 does not prevent task 2 from receiving its reminder.
+- [ ] Automated tests verify scheduler registration:
+  - `setup_scheduler` registers job `deadline_checks` with expected trigger and parameters.
+- [ ] All test functions contain docstrings referencing requirement IDs (`REQ-SCH-03`, `REQ-NFR-02`, `REQ-NFR-03`, `REQ-TSK-02`).
+- [ ] Running `uv run pytest tests/integration/test_deadline_reminders.py` passes with 0 errors and 0 failures.
+- [ ] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- Interactive calendar view in Mini App and monthly task density endpoints (`GET /api/tasks/calendar-summary`), moved to #15
+- Mini App productivity dashboard, completion rate charts, and daily streaks (`GET /api/tasks/analytics`), moved to #16
+- User settings UI for configuring custom notification intervals, reminder preferences, and quiet hours (`/settings`), moved to #17
+- Production deployment, Docker Compose, and unified multi-process runner script (`main.py`), moved to #18
+
+### Constraints
+
+- Files this should stay inside:
+  - `src/scheduler/jobs.py`
+  - `src/scheduler/manager.py`
+  - `src/scheduler/__init__.py`
+  - `src/bot/keyboards/deadline.py`
+  - `src/bot/keyboards/__init__.py`
+  - `src/bot/handlers/deadline.py`
+  - `src/bot/handlers/__init__.py`
+  - `src/bot/dispatcher.py`
+  - `tests/integration/test_deadline_reminders.py`
+- Libraries to use:
+  - `aiogram>=3.0` (`Bot`, `Router`, `F`, `exceptions.TelegramForbiddenError`, `exceptions.TelegramAPIError`, `types.CallbackQuery`, `types.InlineKeyboardMarkup`, `types.InlineKeyboardButton`, `filters.callback_data.CallbackData`)
+  - `apscheduler` (`AsyncIOScheduler`, `CronTrigger` or `IntervalTrigger`)
+  - `sqlalchemy>=2.0` (`select`, `AsyncSession`, `async_sessionmaker`)
+  - Python standard library (`datetime`, `timezone`, `timedelta`, `zoneinfo.ZoneInfo`, `logging`, `unittest.mock`)
+  - `pytest`, `pytest-asyncio`
+- Do not add new dependencies to `pyproject.toml` without explicit permission per `Agents.md` (all required dependencies are already present)
+- Reuse existing models and service methods:
+  - `Task` model in `src/models/task.py` (`reminder_sent_1h`, `reminder_sent_10m`, `deadline_at`, `status`, `user_id`, `priority`, `tag`)
+  - `User` model in `src/models/user.py`
+  - `get_task`, `toggle_task_status`, `update_task` in `src/services/task_service.py`
+- Follow design system guidelines in `_docs/design-system.md` (semantic emojis `⏳`, `🚨`, `✅`, `⏰`, max 2 buttons per row, strikethrough for completed tasks, clean HTML parse mode)
+- Follow testing conventions in `_docs/testing-guidelines.md` (isolated in-memory SQLite fixture `db_session` / `session_factory`, `@pytest.mark.asyncio`, zero real network calls to Telegram, requirement ID docstrings)
+- Strictly enforce tenant isolation per `REQ-NFR-02`
+- Follow modular architectural structure defined in `_docs/schema.md`
+- Do not write implementation code or modify code files in `src/` or `tests/` in this task
 
 ## 15. Mini App Calendar View
 Goal: Build an interactive calendar in the Mini App to navigate and inspect tasks on any selected date.
