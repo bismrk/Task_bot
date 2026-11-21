@@ -9,11 +9,12 @@ from src.api.auth import get_current_user
 from src.api.deps import get_db_session
 from src.models.task import TaskStatus
 from src.models.user import User
-from src.schemas.task import TaskCreate, TaskRead, TaskUpdate
+from src.schemas.task import CalendarDaySummary, TaskCreate, TaskRead, TaskUpdate
 from src.services.task_service import (
     create_task,
     delete_task,
     ensure_recurring_tasks_for_date,
+    get_calendar_summary,
     get_task,
     get_tasks_for_date,
     toggle_task_status,
@@ -58,6 +59,24 @@ async def create_new_task(
         data=payload,
     )
     return task
+
+
+@router.get("/calendar-summary", response_model=list[CalendarDaySummary])
+async def get_monthly_calendar_summary(
+    year: int = Query(..., ge=1900, le=2100),
+    month: int = Query(..., ge=1, le=12),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[CalendarDaySummary]:
+    """Retrieve monthly calendar summary of task counts and statuses for the user."""
+    summaries = await get_calendar_summary(
+        session=session,
+        user_id=current_user.telegram_id,
+        year=year,
+        month=month,
+    )
+    return summaries
+
 
 
 @router.get("/{task_id}", response_model=TaskRead)

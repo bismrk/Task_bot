@@ -1,9 +1,9 @@
 """Pydantic schemas for task extraction, creation, update, and reading."""
 
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.models.task import TaskPriority, TaskStatus
 
@@ -258,3 +258,47 @@ class TaskRead(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class CalendarDaySummary(BaseModel):
+    """Daily summary representing task aggregation and status for calendar view (REQ-TMA-03)."""
+
+    date: date
+    total_tasks: int = Field(default=0, ge=0)
+    completed_tasks: int = Field(default=0, ge=0)
+    status: Literal["all_done", "partial", "todo_only"]
+
+    @model_validator(mode="before")
+    @classmethod
+    def compute_status_if_missing(cls, data: Any) -> Any:
+        """Infer status from completed_tasks and total_tasks if not explicitly provided."""
+        if isinstance(data, dict):
+            total = data.get("total_tasks", 0)
+            completed = data.get("completed_tasks", 0)
+            if "status" not in data or data["status"] is None:
+                if completed == total and total > 0:
+                    data["status"] = "all_done"
+                elif 0 < completed < total:
+                    data["status"] = "partial"
+                else:
+                    data["status"] = "todo_only"
+        return data
+
+    @model_validator(mode="after")
+    def verify_status_consistency(self) -> "CalendarDaySummary":
+        """Verify that status accurately reflects the completion ratio."""
+        if self.completed_tasks == self.total_tasks and self.total_tasks > 0:
+            expected = "all_done"
+        elif 0 < self.completed_tasks < self.total_tasks:
+            expected = "partial"
+        else:
+            expected = "todo_only"
+        if self.status != expected:
+            raise ValueError(
+                f"Status '{self.status}' does not match completion ratio: "
+                f"total={self.total_tasks}, completed={self.completed_tasks} (expected '{expected}')"
+            )
+        return self
+
+    model_config = ConfigDict(from_attributes=True)
+

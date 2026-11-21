@@ -1,13 +1,14 @@
 """Task management CRUD service and task rollover operations."""
 
+import calendar
 from datetime import date, datetime
 import re
 
-from sqlalchemy import case, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.task import Task, TaskPriority, TaskStatus
-from src.schemas.task import ExtractedTask, TaskCreate, TaskUpdate
+from src.schemas.task import CalendarDaySummary, ExtractedTask, TaskCreate, TaskUpdate
 
 
 async def create_task(
@@ -450,4 +451,73 @@ async def ensure_recurring_tasks_for_date(
             await session.refresh(t)
 
     return newly_created
+
+
+async def get_calendar_summary(
+    session: AsyncSession,
+    user_id: int,
+    year: int,
+    month: int,
+) -> list[CalendarDaySummary]:
+    """Retrieve daily task summary counts and completion status for a given month.
+
+    Computes start and end dates of the requested month using calendar.monthrange,
+    queries non-canceled tasks for the user within that date range, aggregates
+    total and completed tasks per day, and returns summaries sorted by date ASC.
+    Strictly enforces tenant isolation (REQ-TMA-03, REQ-NFR-02).
+
+    Args:
+        session: Active SQLAlchemy async session.
+        user_id: Telegram user ID for tenant isolation.
+        year: Year of the calendar month (e.g. 2026).
+        month: Month number (1 to 12).
+
+    Returns:
+        List of CalendarDaySummary objects ordered by date ASC, or [] if no tasks exist.
+    """
+    _, last_day = calendar.monthrange(year, month)
+    start_date = date(year, month, 1)
+    end_date = date(year, month, last_day)
+
+    stmt = (
+        select(
+            Task.target_date,
+            func.count(Task.id).label("total_tasks"),
+            func.count(case((Task.status == TaskStatus.done, Task.id))).label("completed_tasks"),
+        )
+        .where(
+            Task.user_id == user_id,
+            Task.target_date >= start_date,
+            Task.target_date <= end_date,
+            Task.status != TaskStatus.canceled,
+        )
+        .group_by(Task.target_date)
+        .order_by(Task.target_date.asc())
+    )
+    result = await session.execute(stmt)
+    rows = result.all()
+
+    summaries: list[CalendarDaySummary] = []
+    for row in rows:
+        target_date = row.target_date
+        total = int(row.total_tasks)
+        completed = int(row.completed_tasks)
+        if completed == total and total > 0:
+            day_status = "all_done"
+        elif 0 < completed < total:
+            day_status = "partial"
+        else:
+            day_status = "todo_only"
+
+        summaries.append(
+            CalendarDaySummary(
+                date=target_date,
+                total_tasks=total,
+                completed_tasks=completed,
+                status=day_status,
+            )
+        )
+
+    return summaries
+
 

@@ -1,4 +1,5 @@
 import type {
+  CalendarDaySummary,
   TaskCreate,
   TaskRead,
   TaskUpdate,
@@ -115,6 +116,19 @@ export async function fetchTasks(date?: string): Promise<TaskRead[]> {
   const query = date ? `?date=${encodeURIComponent(date)}` : '';
   return apiRequest<TaskRead[]>(`/api/tasks${query}`);
 }
+
+/**
+ * Fetch monthly calendar task summaries (REQ-API-01, REQ-TMA-03).
+ */
+export async function fetchCalendarSummary(
+  year: number,
+  month: number
+): Promise<CalendarDaySummary[]> {
+  return apiRequest<CalendarDaySummary[]>(
+    `/api/tasks/calendar-summary?year=${year}&month=${month}`
+  );
+}
+
 
 /**
  * Create a new task (REQ-TSK-01, REQ-API-02).

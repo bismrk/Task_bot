@@ -59,3 +59,19 @@ export interface TaskUpdate {
   status?: TaskStatus;
   recurrence?: string | null;
 }
+
+/**
+ * Daily aggregation summary for calendar view matching backend CalendarDaySummary.
+ */
+export interface CalendarDaySummary {
+  date: string;
+  total_tasks: number;
+  completed_tasks: number;
+  status: 'all_done' | 'partial' | 'todo_only';
+}
+
+/**
+ * Navigation tabs for the Mini App.
+ */
+export type AppTab = 'today' | 'calendar' | 'analytics' | 'settings';
+

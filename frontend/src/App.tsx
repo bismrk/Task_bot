@@ -1,7 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { fetchCurrentUser, fetchTasks } from './api/client';
-import type { TaskRead, UserProfile } from './api/types';
+import type { AppTab, TaskRead, UserProfile } from './api/types';
 import { TodayChecklist } from './components/TodayChecklist';
+import { CalendarView } from './components/CalendarView';
+import { NavigationTabBar } from './components/NavigationTabBar';
 import {
   User,
   Clock,
@@ -16,6 +18,7 @@ export default function App() {
   const [tasks, setTasks] = useState<TaskRead[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<AppTab>('today');
 
   // Initialize Telegram WebApp viewport and theme
   const updateTheme = useCallback(() => {
@@ -133,7 +136,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Today Checklist Primary View */}
+        {/* Tab Views */}
         {!loading && !error && (
           <div className="space-y-5">
             {/* User Info Micro-bar */}
@@ -150,17 +153,27 @@ export default function App() {
               </div>
             )}
 
-            {/* Checklist Component */}
-            <TodayChecklist
-              initialTasks={tasks}
-              onTasksChanged={(updated) => setTasks(updated)}
-            />
+            {/* Today Checklist View */}
+            {activeTab === 'today' && (
+              <TodayChecklist
+                initialTasks={tasks}
+                onTasksChanged={(updated) => setTasks(updated)}
+              />
+            )}
+
+            {/* Calendar View */}
+            {activeTab === 'calendar' && <CalendarView />}
           </div>
         )}
       </main>
 
+      {/* Bottom Sticky Navigation Tab Bar */}
+      <div className="sticky bottom-0 z-40 bg-background/90 backdrop-blur-md pt-2 pb-1">
+        <NavigationTabBar activeTab={activeTab} onTabChange={setActiveTab} />
+      </div>
+
       {/* Footer */}
-      <footer className="pt-4 border-t border-secondary text-center">
+      <footer className="pt-3 border-t border-secondary text-center">
         <p className="text-[11px] text-muted">
           Telegram Task Tracker &bull; Telegram Mini App
         </p>
