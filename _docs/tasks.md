@@ -829,8 +829,95 @@ Scaffold and configure the Telegram Mini App frontend inside `frontend/` using V
   - Do not implement task checklist UI components (#12) or background scheduler jobs (#13) in this task
 
 ## 12. Mini App Interactive Today Checklist
-Goal: Implement the primary interactive checklist interface with strikethrough, tags, and recurrence.
-Description: Build the main Mini App checklist screen featuring task cards with strikethrough completion checkboxes, priority badges, tags, and deadline countdown indicators. Add interactive controls to toggle completion status, set recurrence (daily / specific weekdays), and launch a quick task-creation modal. Connect UI events to the FastAPI backend with optimistic UI updates for responsive user feedback.
+
+### Goal
+
+Build the interactive Today Checklist in the Telegram Mini App featuring task cards with animated circular checkboxes, strikethrough styling, priority badges, tags, deadline countdowns, recurrence badges, and quick deletion, backed by optimistic UI updates, native Telegram haptic feedback, a task creation modal dialog, and automated recurring task generation across days.
+
+### Acceptance criteria
+
+- [x] `frontend/src/api/types.ts` defines `TaskStatus` type union `'todo' | 'done' | 'canceled'` matching backend `TaskStatus` enum.
+- [x] `frontend/src/api/types.ts` defines `TaskPriority` type union `'low' | 'medium' | 'high'` matching backend `TaskPriority` enum.
+- [x] `frontend/src/api/types.ts` defines `TaskRead` interface containing `id: number`, `user_id: number`, `title: string`, `status: TaskStatus`, `priority: TaskPriority`, `tag: string | null`, `target_date: string`, `deadline_at: string | null`, `recurrence: string | null`, `reminder_sent_1h: boolean`, `reminder_sent_10m: boolean`, and `created_at: string`.
+- [x] `frontend/src/api/types.ts` defines `TaskCreate` interface containing `title: string`, `target_date: string`, `deadline_at?: string | null`, `priority?: TaskPriority`, `tag?: string | null`, and `recurrence?: string | null`.
+- [x] `frontend/src/api/types.ts` defines `TaskUpdate` interface containing optional fields `title?: string`, `target_date?: string`, `deadline_at?: string | null`, `priority?: TaskPriority`, `tag?: string | null`, `status?: TaskStatus`, and `recurrence?: string | null`.
+- [x] `frontend/src/api/client.ts` implements and exports `fetchTasks(date?: string): Promise<TaskRead[]>` issuing `GET /api/tasks` (or `/api/tasks?date=${date}` if `date` is provided) with Telegram `Authorization: tma <initData>` header (REQ-API-01, REQ-API-02).
+- [x] `frontend/src/api/client.ts` implements and exports `createTask(payload: TaskCreate): Promise<TaskRead>` issuing `POST /api/tasks` with JSON payload and Telegram `Authorization` header (REQ-TSK-01, REQ-API-02).
+- [x] `frontend/src/api/client.ts` implements and exports `toggleTask(taskId: number): Promise<TaskRead>` issuing `PATCH /api/tasks/${taskId}/toggle` with Telegram `Authorization` header (REQ-TSK-02).
+- [x] `frontend/src/api/client.ts` implements and exports `updateTask(taskId: number, payload: TaskUpdate): Promise<TaskRead>` issuing `PATCH /api/tasks/${taskId}` with JSON payload and Telegram `Authorization` header (REQ-API-02).
+- [x] `frontend/src/api/client.ts` implements and exports `deleteTask(taskId: number): Promise<void>` issuing `DELETE /api/tasks/${taskId}` with Telegram `Authorization` header (REQ-API-02).
+- [x] `TaskCard` renders an animated circular checkbox reflecting `task.status === 'done'`.
+- [x] When `task.status === 'done'`, task title is rendered with strikethrough styling (`line-through`) and muted opacity (`opacity-60`) per `_docs/design-system.md` (REQ-TMA-01).
+- [x] When `task.status === 'todo'`, task title is rendered with crisp normal text without strikethrough or reduced opacity.
+- [x] `TaskCard` renders a priority badge styled per `_docs/design-system.md`:
+  - High: `bg-red-500/10 text-red-500 border-red-500/20`
+  - Medium: `bg-amber-500/10 text-amber-500 border-amber-500/20`
+  - Low: `bg-slate-500/10 text-slate-400 border-slate-500/20`.
+- [x] When `task.tag` is present, `TaskCard` renders a tag chip displaying `#{task.tag}`.
+- [x] When `task.deadline_at` is present, `TaskCard` renders a deadline countdown/indicator displaying formatted time (e.g. `🕒 15:00`).
+- [x] When `task.recurrence` is present, `TaskCard` renders a recurrence badge (e.g. `🔁 Щодня` for `daily`, or `🔁 Будні` for `weekdays:[0,1,2,3,4]`).
+- [x] Clicking the circular checkbox invokes `onToggle(task.id)` and triggers Telegram haptic feedback `impactOccurred('light')` via `window.Telegram?.WebApp?.HapticFeedback` when available per `_docs/design-system.md`.
+- [x] `TaskCard` renders a delete action button; clicking it invokes `onDelete(task.id)` and triggers Telegram haptic feedback `impactOccurred('medium')` via `window.Telegram?.WebApp?.HapticFeedback` when available per `_docs/design-system.md`.
+- [x] State transitions between `todo` and `done` render smooth animated transitions.
+- [x] `TaskCreationModal` renders an accessible modal dialog or bottom sheet when `isOpen` is true and does not render when `isOpen` is false.
+- [x] Modal contains a required text input for `title` (max 255 characters).
+- [x] Modal contains a priority selector allowing the user to select between `low`, `medium`, and `high`, defaulting to `medium`.
+- [x] Modal contains an optional text input for `tag` (max 50 characters, automatically stripping `#`).
+- [x] Modal contains an optional time input for `deadline` (HH:MM) that combines with the task's target date.
+- [x] Modal contains a recurrence selector with choices: None (`null`), Daily (`daily`), and Weekdays (`weekdays:[0,1,2,3,4]`).
+- [x] Modal submit button is disabled when `title` is empty or contains only whitespace.
+- [x] Submitting the form calls `onSubmit(payload)` with formatted `TaskCreate` data and closes the modal on success.
+- [x] Clicking the cancel button or backdrop invokes `onClose()` and dismisses the modal without submitting.
+- [x] `TodayChecklist` renders a header with progress counter displaying "X з Y виконано" (e.g. "2 з 5 виконано") and a visual progress bar indicating the completion percentage.
+- [x] When 0 tasks exist for today, renders an empty state card with an icon, message ("На сьогодні завдань немає"), and prompt to add tasks.
+- [x] When tasks exist, renders task cards ordered with `todo` tasks first sorted by priority (high -> medium -> low), followed by `done` tasks.
+- [x] Implements optimistic UI update on status toggle: toggling a checkbox immediately flips task status between `todo` and `done` and updates the progress counter in local state; if the backend API call fails, changes are rolled back to the prior state and an error notification is shown (REQ-TMA-01).
+- [x] Implements optimistic UI update on deletion: clicking delete immediately removes the task from local state and updates the counter; if the backend API call fails, the task is restored to the list and an error notification is shown.
+- [x] Renders a prominent Floating Action Button (FAB) or button labeled `+ Додати завдання` that opens `TaskCreationModal`.
+- [x] When a new task is created via `TaskCreationModal`, it is immediately added to the checklist and the progress counter updates.
+- [x] `frontend/src/App.tsx` embeds `TodayChecklist` as the primary screen of the Mini App.
+- [x] On mount, fetches today's tasks via `fetchTasks()` in addition to user profile details.
+- [x] Displays a loading skeleton or indicator while checklist data is loading.
+- [x] Renders an error banner with a retry action if fetching tasks fails.
+- [x] `src/services/task_service.py` defines async `ensure_recurring_tasks_for_date(session: AsyncSession, user_id: int, target_date: date) -> list[Task]` (REQ-TMA-02).
+- [x] `ensure_recurring_tasks_for_date` queries recurring tasks (`recurrence.isnot(None)`) owned by `user_id` where `target_date < target_date`.
+- [x] For each recurring rule matching `target_date` (`daily` every day; `weekdays:[...]` matching `target_date.weekday()`):
+  - Checks if an instance with the same title and recurrence rule already exists for `target_date` under `user_id`.
+  - If no instance exists for `target_date`, creates a new task instance for `target_date` with `status=TaskStatus.todo`, copying `title`, `priority`, `tag`, `recurrence`, and relative `deadline_at` (adjusted to `target_date`), with `reminder_sent_1h=False` and `reminder_sent_10m=False`.
+- [x] `GET /api/tasks` invokes `ensure_recurring_tasks_for_date` for `target_date` before returning results so recurring tasks automatically appear in the checklist on new days (REQ-TMA-02).
+- [x] `src/services/__init__.py` imports and exposes `ensure_recurring_tasks_for_date`.
+- [x] `tests/integration/test_checklist_api_flow.py` contains automated integration tests using `TestClient` and in-memory SQLite fixture with valid signed `initData`.
+- [x] Automated tests verify the complete checklist API flow: initial empty list retrieval, task creation with priority, tag, deadline, and recurrence, status toggle to `done` and back to `todo`, task update, and task deletion.
+- [x] Automated tests verify recurring task generation: calling `GET /api/tasks?date=YYYY-MM-DD` for a new date automatically creates a `todo` task instance for `daily` and matching `weekdays` recurring tasks (REQ-TMA-02).
+- [x] Automated tests verify tenant isolation: requests to toggle or delete another user's task return HTTP 404 and do not modify database records (REQ-NFR-02).
+- [x] All test functions contain docstrings referencing requirement IDs (`REQ-TMA-01`, `REQ-TMA-02`, `REQ-API-02`, `REQ-TSK-01`, `REQ-TSK-02`, `REQ-NFR-02`).
+- [x] Running `npm run typecheck` (or `npx tsc --noEmit`) in `frontend/` succeeds with exit code 0 and 0 errors.
+- [x] Running `npm run build` in `frontend/` succeeds with exit code 0 and updates static production assets in `frontend/dist/`.
+- [x] Running `uv run pytest tests/integration/test_checklist_api_flow.py` passes with exit code 0.
+- [x] Running `uv run pytest` executes the complete test suite and passes with 0 errors and 0 failures.
+
+### Out of scope
+
+- Mini App Calendar view tab and monthly activity indicator endpoints (`GET /api/tasks/calendar-summary`), moved to #15
+- Mini App productivity dashboard, completion rate charts, and daily streaks (`GET /api/tasks/analytics`), moved to #16
+- User settings UI for configuring timezones and reminder intervals (`PATCH /api/settings/timezone`), moved to #17
+- APScheduler timezone-aware background jobs (00:00 rollover & 09:00 push), moved to #13
+- Scheduled deadline proximity push notifications (-1h and -10m), moved to #14
+- Production deployment, Docker Compose, and unified runner script (`main.py`), moved to #18
+
+### Constraints
+
+- Files this should stay inside:
+  - Frontend: `frontend/src/api/types.ts`, `frontend/src/api/client.ts`, `frontend/src/components/TaskCard.tsx`, `frontend/src/components/TaskCreationModal.tsx`, `frontend/src/components/TodayChecklist.tsx`, `frontend/src/App.tsx`, `frontend/dist/**`
+  - Backend: `src/services/task_service.py`, `src/services/__init__.py`, `src/api/routes/tasks.py`, `tests/integration/test_checklist_api_flow.py`
+- Libraries to use:
+  - Frontend: React 18, TypeScript, Tailwind CSS, `lucide-react`, `@telegram-apps/sdk-react`
+  - Backend: FastAPI, SQLAlchemy 2.0 (`AsyncSession`, `select`), Pydantic 2, pytest, pytest-asyncio, `fastapi.testclient.TestClient`
+- Do not add new dependencies to `pyproject.toml` or `package.json` without asking per `Agents.md`
+- Follow design system guidelines in `_docs/design-system.md` (priority badges, strikethrough, haptic feedback, safe area insets)
+- Follow testing conventions in `_docs/testing-guidelines.md` (isolated in-memory SQLite fixture, `@pytest.mark.asyncio`, zero real network calls, REQ docstrings)
+- Strictly enforce tenant isolation per `REQ-NFR-02`
+
 
 ## 13. Timezone-Aware Background Scheduler (00:00 & 09:00 Triggers)
 Goal: Implement APScheduler background jobs that trigger midnight reviews and morning pushes per user timezone.

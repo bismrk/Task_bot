@@ -1,50 +1,59 @@
 import { useEffect, useState, useCallback } from 'react';
-import { fetchCurrentUser } from './api/client';
-import type { UserProfile } from './api/types';
+import { fetchCurrentUser, fetchTasks } from './api/client';
+import type { TaskRead, UserProfile } from './api/types';
+import { TodayChecklist } from './components/TodayChecklist';
 import {
   User,
   Clock,
-  Moon,
-  Sun,
-  CheckCircle2,
+  Sparkles,
+  Loader2,
   AlertCircle,
   RefreshCw,
-  Loader2,
-  Sparkles,
 } from 'lucide-react';
 
 export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [tasks, setTasks] = useState<TaskRead[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-  const [themeMode, setThemeMode] = useState<'Dark' | 'Light'>('Light');
 
-  // Detect and apply Telegram or system theme
+  // Initialize Telegram WebApp viewport and theme
   const updateTheme = useCallback(() => {
-    let detectedTheme: 'Dark' | 'Light' = 'Light';
     if (typeof window !== 'undefined') {
-      if (window.Telegram?.WebApp?.colorScheme) {
-        detectedTheme = window.Telegram.WebApp.colorScheme === 'dark' ? 'Dark' : 'Light';
-      } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-        detectedTheme = 'Dark';
+      try {
+        window.Telegram?.WebApp?.ready?.();
+        window.Telegram?.WebApp?.expand?.();
+      } catch {
+        // ignore outside Telegram environment
       }
-    }
-    setThemeMode(detectedTheme);
-    if (detectedTheme === 'Dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
+
+      let isDark = false;
+      if (window.Telegram?.WebApp?.colorScheme) {
+        isDark = window.Telegram.WebApp.colorScheme === 'dark';
+      } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        isDark = true;
+      }
+
+      if (isDark) {
+        document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+      }
     }
   }, []);
 
-  const loadUser = useCallback(async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchCurrentUser();
-      setUser(data);
+      const [userData, tasksData] = await Promise.all([
+        fetchCurrentUser(),
+        fetchTasks(),
+      ]);
+      setUser(userData);
+      setTasks(tasksData);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to connect to backend';
+      const message = err instanceof Error ? err.message : 'Не вдалося завантажити дані';
       setError(message);
     } finally {
       setLoading(false);
@@ -53,7 +62,7 @@ export default function App() {
 
   useEffect(() => {
     updateTheme();
-    loadUser();
+    loadData();
 
     // Listen to theme changes from Telegram WebApp
     const handleThemeChange = () => updateTheme();
@@ -63,18 +72,23 @@ export default function App() {
         window.Telegram?.WebApp?.offEvent?.('themeChanged', handleThemeChange);
       };
     }
-  }, [updateTheme, loadUser]);
+  }, [updateTheme, loadData]);
 
-  const telegramUser = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initDataUnsafe?.user : undefined;
-  const usernameDisplay = telegramUser?.username ? `@${telegramUser.username}` : null;
+  const telegramUser =
+    typeof window !== 'undefined' ? window.Telegram?.WebApp?.initDataUnsafe?.user : undefined;
+  const usernameDisplay = telegramUser?.username
+    ? `@${telegramUser.username}`
+    : telegramUser?.first_name || (user ? `ID: ${user.telegram_id}` : null);
 
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col justify-between p-4 sm:p-6 max-w-lg mx-auto">
-      {/* Header */}
+      {/* App Header */}
       <header className="flex items-center justify-between pb-4 border-b border-secondary">
         <div>
-          <h1 className="text-xl font-bold tracking-tight">Telegram Task Tracker</h1>
-          <p className="text-xs text-muted mt-0.5">Focus on what matters today</p>
+          <h1 className="text-xl font-bold tracking-tight">Daily Tasks</h1>
+          <p className="text-xs text-muted mt-0.5">
+            {usernameDisplay ? `Привіт, ${usernameDisplay}` : 'Ваш персональний трекер завдань'}
+          </p>
         </div>
         <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-secondary text-xs font-medium">
           <Sparkles className="w-3.5 h-3.5 text-primary" />
@@ -82,87 +96,65 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="flex-1 flex flex-col justify-center py-6">
+      {/* Main Content */}
+      <main className="flex-1 py-4">
+        {/* Loading Skeleton / Indicator */}
         {loading && (
-          <div className="flex flex-col items-center justify-center py-12 space-y-4">
-            <Loader2 className="w-8 h-8 animate-spin text-primary" />
-            <p className="text-sm text-muted">Loading user profile...</p>
+          <div className="space-y-4 py-8">
+            <div className="flex flex-col items-center justify-center py-6 space-y-3">
+              <Loader2 className="w-8 h-8 animate-spin text-primary" />
+              <p className="text-sm text-muted">Завантаження завдань...</p>
+            </div>
+            {/* Skeleton items */}
+            <div className="space-y-2.5 animate-pulse opacity-60">
+              <div className="h-16 rounded-2xl bg-secondary" />
+              <div className="h-16 rounded-2xl bg-secondary" />
+              <div className="h-16 rounded-2xl bg-secondary" />
+            </div>
           </div>
         )}
 
+        {/* Error Banner with Retry Action */}
         {!loading && error && (
-          <div className="p-4 rounded-xl bg-secondary border border-red-500/30 flex flex-col items-center text-center space-y-3">
+          <div className="p-5 rounded-2xl bg-secondary border border-red-500/30 flex flex-col items-center text-center space-y-3 my-6">
             <AlertCircle className="w-10 h-10 text-red-500" />
             <div className="space-y-1">
-              <h3 className="font-semibold text-sm">Connection Error</h3>
+              <h3 className="font-semibold text-sm">Помилка завантаження</h3>
               <p className="text-xs text-muted max-w-xs">{error}</p>
             </div>
             <button
-              onClick={loadUser}
-              className="mt-2 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:opacity-90 transition active:scale-95"
+              type="button"
+              onClick={loadData}
+              className="mt-2 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-semibold hover:opacity-90 transition active:scale-95 cursor-pointer shadow-md shadow-primary/20"
             >
               <RefreshCw className="w-3.5 h-3.5" />
-              <span>Retry</span>
+              <span>Повторити спробу</span>
             </button>
           </div>
         )}
 
-        {!loading && !error && user && (
-          <div className="space-y-4">
-            {/* User Identifier Card */}
-            <div className="p-4 rounded-2xl bg-secondary border border-black/5 dark:border-white/5 space-y-3">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold">
-                  <User className="w-5 h-5" />
+        {/* Today Checklist Primary View */}
+        {!loading && !error && (
+          <div className="space-y-5">
+            {/* User Info Micro-bar */}
+            {user && (
+              <div className="flex items-center justify-between text-xs text-muted px-1">
+                <div className="flex items-center gap-1.5">
+                  <User className="w-3.5 h-3.5" />
+                  <span>Користувач: {user.telegram_id}</span>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-muted">Telegram User</p>
-                  <p className="text-base font-semibold truncate">
-                    {usernameDisplay ? `${usernameDisplay} (${user.telegram_id})` : `ID: ${user.telegram_id}`}
-                  </p>
+                <div className="flex items-center gap-1">
+                  <Clock className="w-3 h-3" />
+                  <span>{user.timezone}</span>
                 </div>
               </div>
-              <div className="pt-2 border-t border-black/5 dark:border-white/5 flex items-center justify-between text-xs text-muted">
-                <span>Account Created</span>
-                <span>{new Date(user.created_at).toLocaleDateString()}</span>
-              </div>
-            </div>
+            )}
 
-            {/* Badges Grid */}
-            <div className="grid grid-cols-3 gap-2">
-              {/* Timezone Badge */}
-              <div className="p-3 rounded-xl bg-secondary flex flex-col items-center justify-center text-center">
-                <Clock className="w-4 h-4 text-primary mb-1" />
-                <span className="text-[10px] text-muted uppercase tracking-wider">Timezone</span>
-                <span className="text-xs font-medium truncate w-full mt-0.5" title={user.timezone}>
-                  {user.timezone}
-                </span>
-              </div>
-
-              {/* Theme Mode Indicator Badge */}
-              <div className="p-3 rounded-xl bg-secondary flex flex-col items-center justify-center text-center">
-                {themeMode === 'Dark' ? (
-                  <Moon className="w-4 h-4 text-indigo-400 mb-1" />
-                ) : (
-                  <Sun className="w-4 h-4 text-amber-500 mb-1" />
-                )}
-                <span className="text-[10px] text-muted uppercase tracking-wider">Theme</span>
-                <span className="text-xs font-medium mt-0.5">{themeMode}</span>
-              </div>
-
-              {/* Connection Status Indicator Badge */}
-              <div className="p-3 rounded-xl bg-secondary flex flex-col items-center justify-center text-center">
-                <div className="flex items-center gap-1 mb-1">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                  <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                </div>
-                <span className="text-[10px] text-muted uppercase tracking-wider">Status</span>
-                <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400 mt-0.5">
-                  Connected
-                </span>
-              </div>
-            </div>
+            {/* Checklist Component */}
+            <TodayChecklist
+              initialTasks={tasks}
+              onTasksChanged={(updated) => setTasks(updated)}
+            />
           </div>
         )}
       </main>
@@ -170,7 +162,7 @@ export default function App() {
       {/* Footer */}
       <footer className="pt-4 border-t border-secondary text-center">
         <p className="text-[11px] text-muted">
-          Telegram Mini App ready &bull; Daily task tracker
+          Telegram Task Tracker &bull; Telegram Mini App
         </p>
       </footer>
     </div>

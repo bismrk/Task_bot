@@ -1,4 +1,9 @@
-import type { UserProfile } from './types';
+import type {
+  TaskCreate,
+  TaskRead,
+  TaskUpdate,
+  UserProfile,
+} from './types';
 
 declare global {
   interface Window {
@@ -23,6 +28,11 @@ declare global {
         close: () => void;
         onEvent?: (eventType: string, eventHandler: () => void) => void;
         offEvent?: (eventType: string, eventHandler: () => void) => void;
+        HapticFeedback?: {
+          impactOccurred: (style: 'light' | 'medium' | 'heavy' | 'rigid' | 'soft') => void;
+          notificationOccurred: (type: 'error' | 'success' | 'warning') => void;
+          selectionChanged: () => void;
+        };
         [key: string]: unknown;
       };
     };
@@ -84,6 +94,10 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
     throw new Error(`API Error ${response.status}: ${detail}`);
   }
 
+  if (response.status === 204) {
+    return undefined as unknown as T;
+  }
+
   return (await response.json()) as T;
 }
 
@@ -92,4 +106,50 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
  */
 export async function fetchCurrentUser(): Promise<UserProfile> {
   return apiRequest<UserProfile>('/api/me');
+}
+
+/**
+ * Fetch tasks for a given date or today in user local time (REQ-API-01, REQ-API-02).
+ */
+export async function fetchTasks(date?: string): Promise<TaskRead[]> {
+  const query = date ? `?date=${encodeURIComponent(date)}` : '';
+  return apiRequest<TaskRead[]>(`/api/tasks${query}`);
+}
+
+/**
+ * Create a new task (REQ-TSK-01, REQ-API-02).
+ */
+export async function createTask(payload: TaskCreate): Promise<TaskRead> {
+  return apiRequest<TaskRead>('/api/tasks', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Toggle task completion status between todo and done (REQ-TSK-02).
+ */
+export async function toggleTask(taskId: number): Promise<TaskRead> {
+  return apiRequest<TaskRead>(`/api/tasks/${taskId}/toggle`, {
+    method: 'PATCH',
+  });
+}
+
+/**
+ * Partially update a task (REQ-API-02).
+ */
+export async function updateTask(taskId: number, payload: TaskUpdate): Promise<TaskRead> {
+  return apiRequest<TaskRead>(`/api/tasks/${taskId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Delete a task (REQ-API-02).
+ */
+export async function deleteTask(taskId: number): Promise<void> {
+  return apiRequest<void>(`/api/tasks/${taskId}`, {
+    method: 'DELETE',
+  });
 }

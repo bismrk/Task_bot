@@ -13,6 +13,7 @@ from src.schemas.task import TaskCreate, TaskRead, TaskUpdate
 from src.services.task_service import (
     create_task,
     delete_task,
+    ensure_recurring_tasks_for_date,
     get_task,
     get_tasks_for_date,
     toggle_task_status,
@@ -31,6 +32,11 @@ async def list_tasks(
 ) -> list[TaskRead]:
     """Retrieve tasks for a specific date or today in user local time."""
     target_date = date if date is not None else get_user_local_time(current_user).date()
+    await ensure_recurring_tasks_for_date(
+        session=session,
+        user_id=current_user.telegram_id,
+        target_date=target_date,
+    )
     tasks = await get_tasks_for_date(
         session=session,
         user_id=current_user.telegram_id,

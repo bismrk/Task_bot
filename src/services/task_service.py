@@ -1,6 +1,7 @@
 """Task management CRUD service and task rollover operations."""
 
-from datetime import date
+from datetime import date, datetime
+import re
 
 from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -335,3 +336,118 @@ async def batch_rollover_tasks(
     for task in tasks:
         await session.refresh(task)
     return tasks
+
+
+def is_recurrence_active_on_date(recurrence: str | None, target_date: date) -> bool:
+    """Check whether a recurrence rule applies to the specified target_date.
+
+    Supports:
+        - 'daily': every calendar day.
+        - 'weekdays:[...]': specific weekday indices (0=Mon, ..., 6=Sun), e.g. [0,1,2,3,4].
+        - 'weekdays': Monday through Friday (0..4).
+    """
+    if not recurrence:
+        return False
+    rec = recurrence.strip().lower()
+    if rec == "daily":
+        return True
+    if rec.startswith("weekdays:"):
+        match = re.search(r"weekdays:\[([0-9,\s]*)\]", rec)
+        if match:
+            day_strs = match.group(1).split(",")
+            days = [int(s.strip()) for s in day_strs if s.strip().isdigit()]
+            return target_date.weekday() in days
+        days = [int(s.strip()) for s in rec.replace("weekdays:", "").split(",") if s.strip().isdigit()]
+        if days:
+            return target_date.weekday() in days
+    if rec == "weekdays":
+        return target_date.weekday() in (0, 1, 2, 3, 4)
+    return False
+
+
+async def ensure_recurring_tasks_for_date(
+    session: AsyncSession,
+    user_id: int,
+    target_date: date,
+) -> list[Task]:
+    """Ensure recurring task instances exist for target_date (REQ-TMA-02).
+
+    Queries recurring tasks owned by user_id with target_date < target_date.
+    For each recurring task matching the target_date rule, checks if an instance
+    with the same title and recurrence already exists for target_date under user_id.
+    If no instance exists, creates a new task instance for target_date with status=todo,
+    copying title, priority, tag, recurrence, and relative deadline_at (adjusted to target_date),
+    with reminder_sent_1h=False and reminder_sent_10m=False.
+
+    Args:
+        session: Active SQLAlchemy async session.
+        user_id: Telegram user ID for tenant isolation.
+        target_date: Target date to populate recurring tasks for.
+
+    Returns:
+        List of newly created Task instances for target_date.
+    """
+    # 1. Fetch existing tasks for target_date to avoid duplicates
+    existing_stmt = select(Task).where(
+        Task.user_id == user_id,
+        Task.target_date == target_date,
+    )
+    existing_result = await session.execute(existing_stmt)
+    existing_tasks = list(existing_result.scalars().all())
+    existing_rules = {(t.title, t.recurrence) for t in existing_tasks if t.recurrence is not None}
+
+    # 2. Query recurring tasks where target_date < target_date
+    query_stmt = (
+        select(Task)
+        .where(
+            Task.user_id == user_id,
+            Task.recurrence.isnot(None),
+            Task.target_date < target_date,
+        )
+        .order_by(Task.target_date.asc(), Task.id.asc())
+    )
+    result = await session.execute(query_stmt)
+    past_recurring_tasks = list(result.scalars().all())
+
+    newly_created: list[Task] = []
+    for past_task in past_recurring_tasks:
+        if not past_task.recurrence:
+            continue
+
+        if not is_recurrence_active_on_date(past_task.recurrence, target_date):
+            continue
+
+        rule_key = (past_task.title, past_task.recurrence)
+        if rule_key in existing_rules:
+            continue
+
+        # Adjust deadline_at relative to target_date if present
+        new_deadline_at = None
+        if past_task.deadline_at is not None:
+            day_offset = past_task.deadline_at.date() - past_task.target_date
+            new_deadline_date = target_date + day_offset
+            new_deadline_at = datetime.combine(new_deadline_date, past_task.deadline_at.timetz())
+
+        new_task = Task(
+            user_id=user_id,
+            title=past_task.title,
+            target_date=target_date,
+            deadline_at=new_deadline_at,
+            priority=past_task.priority,
+            tag=past_task.tag,
+            recurrence=past_task.recurrence,
+            status=TaskStatus.todo,
+            reminder_sent_1h=False,
+            reminder_sent_10m=False,
+        )
+        newly_created.append(new_task)
+        existing_rules.add(rule_key)
+
+    if newly_created:
+        session.add_all(newly_created)
+        await session.commit()
+        for t in newly_created:
+            await session.refresh(t)
+
+    return newly_created
+
