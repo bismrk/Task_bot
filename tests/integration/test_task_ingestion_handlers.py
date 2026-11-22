@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiogram import Bot
 from aiogram.enums import ChatAction
+from aiogram.methods import EditMessageText
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -50,29 +51,41 @@ def create_fsm_context(user_id: int, chat_id: int, bot_id: int = 1) -> tuple[FSM
 
 
 def test_get_task_confirmation_keyboard_structure() -> None:
-    """Verifies REQ-AI-03: get_task_confirmation_keyboard returns 2 buttons in a single row."""
+    """Verifies REQ-AI-03: get_task_confirmation_keyboard returns 3 buttons across 2 rows with max 2 buttons per row."""
     user_id = 12345
     kb = get_task_confirmation_keyboard(user_id=user_id)
 
     assert isinstance(kb, InlineKeyboardMarkup)
-    assert len(kb.inline_keyboard) == 1
-    row = kb.inline_keyboard[0]
-    assert len(row) <= 2  # Design system: max 2 buttons per row
-    assert len(row) == 2
+    assert len(kb.inline_keyboard) == 2
+    for r in kb.inline_keyboard:
+        assert len(r) <= 2  # Design system: max 2 buttons per row
+
+    row0 = kb.inline_keyboard[0]
+    assert len(row0) == 2
 
     # Save button
-    save_btn = row[0]
+    save_btn = row0[0]
     assert save_btn.text == "✅ Зберегти"
     save_data = TaskConfirmCallback.unpack(save_btn.callback_data)
     assert save_data.action == "save"
     assert save_data.user_id == user_id
 
     # Edit button
-    edit_btn = row[1]
+    edit_btn = row0[1]
     assert edit_btn.text == "✏️ Виправити"
     edit_data = TaskConfirmCallback.unpack(edit_btn.callback_data)
     assert edit_data.action == "edit"
     assert edit_data.user_id == user_id
+
+    row1 = kb.inline_keyboard[1]
+    assert len(row1) == 1
+
+    # Delete button
+    delete_btn = row1[0]
+    assert delete_btn.text == "🗑️ Видалити"
+    delete_data = TaskConfirmCallback.unpack(delete_btn.callback_data)
+    assert delete_data.action == "delete"
+    assert delete_data.user_id == user_id
 
 
 def test_format_extracted_tasks_message_formatting() -> None:
@@ -226,6 +239,7 @@ async def test_handle_voice_message_success(db_session: AsyncSession) -> None:
         assert isinstance(keyboard, InlineKeyboardMarkup)
         assert keyboard.inline_keyboard[0][0].text == "✅ Зберегти"
         assert keyboard.inline_keyboard[0][1].text == "✏️ Виправити"
+        assert keyboard.inline_keyboard[1][0].text == "🗑️ Видалити"
 
 
 @pytest.mark.asyncio
@@ -655,6 +669,187 @@ async def test_callback_expired_state_handling(db_session: AsyncSession) -> None
     assert len((await db_session.execute(stmt)).scalars().all()) == 0
 
 
+@pytest.mark.asyncio
+async def test_callback_delete_cancels_tasks_and_clears_fsm(db_session: AsyncSession) -> None:
+    """Verifies REQ-AI-03, REQ-TSK-01, REQ-NFR-02: [🗑️ Видалити] callback clears FSM, edits message, and saves nothing to DB."""
+    user_id = 50002
+    chat_id = 50002
+
+    state, _ = create_fsm_context(user_id=user_id, chat_id=chat_id)
+    pending_tasks = [
+        ExtractedTask(
+            title="Непотрібне завдання",
+            target_date=date(2026, 11, 20),
+            priority=TaskPriority.medium,
+        ).model_dump(mode="json")
+    ]
+    await state.set_state(TaskIngestionState.waiting_confirmation)
+    await state.update_data(pending_tasks=pending_tasks)
+
+    mock_message = AsyncMock(spec=Message)
+    mock_message.edit_text = AsyncMock()
+
+    tg_user = TgUser(id=user_id, is_bot=False, first_name="DeleteUser")
+    callback_query = AsyncMock(spec=CallbackQuery)
+    callback_query.from_user = tg_user
+    callback_query.message = mock_message
+    callback_query.answer = AsyncMock()
+
+    callback_data = TaskConfirmCallback(action="delete", user_id=user_id)
+
+    await task_confirm_callback(
+        callback_query=callback_query,
+        callback_data=callback_data,
+        session=db_session,
+        state=state,
+    )
+
+    # 1. Assert FSM state cleared
+    assert await state.get_state() is None
+    assert (await state.get_data()) == {}
+
+    # 2. Assert message edited to cancellation text and keyboard removed
+    mock_message.edit_text.assert_called_once_with(
+        text="🗑️ <b>Завдання скасовано та видалено.</b>",
+        reply_markup=None,
+    )
+
+    # 3. Assert callback answered
+    callback_query.answer.assert_called_once_with("Скасовано!")
+
+    # 4. Assert zero tasks in DB
+    stmt = select(Task).where(Task.user_id == user_id)
+    assert len((await db_session.execute(stmt)).scalars().all()) == 0
+
+
+@pytest.mark.asyncio
+async def test_callback_delete_tenant_security_rejection(db_session: AsyncSession) -> None:
+    """Verifies REQ-AI-03, REQ-NFR-02: [🗑️ Видалити] callback from unauthorized user is rejected with alert."""
+    owner_id = 50003
+    attacker_id = 99998
+    chat_id = 50003
+
+    state, _ = create_fsm_context(user_id=owner_id, chat_id=chat_id)
+    initial_tasks = [
+        ExtractedTask(
+            title="Особисте завдання",
+            target_date=date(2026, 11, 20),
+            priority=TaskPriority.high,
+        ).model_dump(mode="json")
+    ]
+    await state.set_state(TaskIngestionState.waiting_confirmation)
+    await state.update_data(pending_tasks=initial_tasks)
+
+    mock_message = AsyncMock(spec=Message)
+    mock_message.edit_text = AsyncMock()
+
+    attacker_user = TgUser(id=attacker_id, is_bot=False, first_name="Attacker")
+    callback_query = AsyncMock(spec=CallbackQuery)
+    callback_query.from_user = attacker_user
+    callback_query.message = mock_message
+    callback_query.answer = AsyncMock()
+
+    callback_data = TaskConfirmCallback(action="delete", user_id=owner_id)
+
+    await task_confirm_callback(
+        callback_query=callback_query,
+        callback_data=callback_data,
+        session=db_session,
+        state=state,
+    )
+
+    # 1. Assert alert was displayed to unauthorized user
+    callback_query.answer.assert_called_once_with(
+        "⚠️ Ви не можете керувати завданнями іншого користувача.",
+        show_alert=True,
+    )
+
+    # 2. Assert message was NOT modified
+    mock_message.edit_text.assert_not_called()
+
+    # 3. Assert owner's state was NOT cleared
+    assert await state.get_state() == TaskIngestionState.waiting_confirmation.state
+    data = await state.get_data()
+    assert data["pending_tasks"] == initial_tasks
+
+    # 4. Assert no tasks were persisted
+    stmt = select(Task)
+    assert len((await db_session.execute(stmt)).scalars().all()) == 0
+
+
+@pytest.mark.asyncio
+async def test_callback_delete_with_already_cleared_fsm(db_session: AsyncSession) -> None:
+    """Verifies REQ-AI-03: [🗑️ Видалити] callback when FSM state is already empty/None executes safely."""
+    user_id = 50004
+    chat_id = 50004
+
+    state, _ = create_fsm_context(user_id=user_id, chat_id=chat_id)
+
+    mock_message = AsyncMock(spec=Message)
+    mock_message.edit_text = AsyncMock()
+
+    tg_user = TgUser(id=user_id, is_bot=False, first_name="ClearedUser")
+    callback_query = AsyncMock(spec=CallbackQuery)
+    callback_query.from_user = tg_user
+    callback_query.message = mock_message
+    callback_query.answer = AsyncMock()
+
+    callback_data = TaskConfirmCallback(action="delete", user_id=user_id)
+
+    await task_confirm_callback(
+        callback_query=callback_query,
+        callback_data=callback_data,
+        session=db_session,
+        state=state,
+    )
+
+    # 1. Assert message edited to cancellation text and keyboard removed
+    mock_message.edit_text.assert_called_once_with(
+        text="🗑️ <b>Завдання скасовано та видалено.</b>",
+        reply_markup=None,
+    )
+
+    # 2. Assert callback answered
+    callback_query.answer.assert_called_once_with("Скасовано!")
+
+    # 3. Assert state is still cleared
+    assert await state.get_state() is None
+    assert (await state.get_data()) == {}
+
+
+@pytest.mark.asyncio
+async def test_callback_delete_message_none_safety(db_session: AsyncSession) -> None:
+    """Verifies REQ-AI-03: [🗑️ Видалити] callback when callback_query.message is None executes safely."""
+    user_id = 50005
+    chat_id = 50005
+
+    state, _ = create_fsm_context(user_id=user_id, chat_id=chat_id)
+    await state.set_state(TaskIngestionState.waiting_confirmation)
+    await state.update_data(pending_tasks=[{"title": "test"}])
+
+    tg_user = TgUser(id=user_id, is_bot=False, first_name="NoMsgUser")
+    callback_query = AsyncMock(spec=CallbackQuery)
+    callback_query.from_user = tg_user
+    callback_query.message = None
+    callback_query.answer = AsyncMock()
+
+    callback_data = TaskConfirmCallback(action="delete", user_id=user_id)
+
+    await task_confirm_callback(
+        callback_query=callback_query,
+        callback_data=callback_data,
+        session=db_session,
+        state=state,
+    )
+
+    # 1. Assert state cleared
+    assert await state.get_state() is None
+    assert (await state.get_data()) == {}
+
+    # 2. Assert callback answered
+    callback_query.answer.assert_called_once_with("Скасовано!")
+
+
 # ==============================================================================
 # Full Dispatcher Pipeline Integration Tests
 # ==============================================================================
@@ -772,6 +967,92 @@ async def test_dispatcher_feed_text_message_to_save_callback_pipeline(db_session
         assert saved[0].title == "Підготувати презентацію"
         assert saved[0].status == TaskStatus.todo
         assert saved[0].priority == TaskPriority.high
+
+        # Check FSM cleared
+        cleared_state = await dp.storage.get_state(key=key)
+        assert cleared_state is None
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_feed_text_message_to_delete_callback_pipeline(db_session: AsyncSession) -> None:
+    """Verifies REQ-AI-02, REQ-AI-03, REQ-TSK-01: Full pipeline: text message -> FSM waiting_confirmation -> delete callback -> FSM cleared & zero DB tasks."""
+    bind = db_session.bind
+    session_factory = async_sessionmaker(bind=bind, expire_on_commit=False, class_=AsyncSession)
+
+    dp = create_dispatcher(sessionmaker=session_factory)
+
+    telegram_id = 70002
+    tg_user = TgUser(id=telegram_id, is_bot=False, first_name="PipelineDeleteTester")
+    chat = Chat(id=telegram_id, type="private")
+
+    mock_bot = AsyncMock(spec=Bot)
+    mock_bot.id = 1
+    mock_bot.send_chat_action = AsyncMock()
+
+    extracted = [
+        ExtractedTask(
+            title="Скасоване завдання",
+            target_date=date(2026, 11, 22),
+            priority=TaskPriority.medium,
+            tag="тест",
+        )
+    ]
+
+    with patch("src.bot.handlers.voice_text.parse_tasks_from_text", new_callable=AsyncMock, return_value=extracted):
+        msg = Message(
+            message_id=301,
+            date=datetime.now(timezone.utc),
+            chat=chat,
+            from_user=tg_user,
+            text="Скасоване завдання на післязавтра",
+        )
+        await dp.feed_update(bot=mock_bot, update=Update(update_id=301, message=msg))
+
+        # Check bot sent chat action and reply
+        mock_bot.send_chat_action.assert_called_with(chat_id=telegram_id, action=ChatAction.TYPING)
+
+        # Check FSM state in dispatcher storage
+        key = StorageKey(bot_id=1, chat_id=telegram_id, user_id=telegram_id)
+        current_state = await dp.storage.get_state(key=key)
+        assert current_state == TaskIngestionState.waiting_confirmation.state
+
+        state_data = await dp.storage.get_data(key=key)
+        assert len(state_data["pending_tasks"]) == 1
+
+        # Now simulate user pressing [🗑️ Видалити]
+        cb_data = TaskConfirmCallback(action="delete", user_id=telegram_id).pack()
+        cb_msg = Message(
+            message_id=302,
+            date=datetime.now(timezone.utc),
+            chat=chat,
+            from_user=tg_user,
+            text="Розпізнані завдання",
+        )
+
+        cb_query = CallbackQuery(
+            id="cb_q_2",
+            from_user=tg_user,
+            chat_instance="ci_2",
+            message=cb_msg,
+            data=cb_data,
+        )
+
+        await dp.feed_update(bot=mock_bot, update=Update(update_id=302, callback_query=cb_query))
+
+        # Check zero tasks persisted to DB
+        stmt = select(Task).where(Task.user_id == telegram_id)
+        saved = list((await db_session.execute(stmt)).scalars().all())
+        assert len(saved) == 0
+
+        # Check bot edited message text to cancellation text
+        edit_calls = [
+            call.args[0]
+            for call in mock_bot.call_args_list
+            if call.args and isinstance(call.args[0], EditMessageText)
+        ]
+        assert len(edit_calls) == 1
+        assert edit_calls[0].text == "🗑️ <b>Завдання скасовано та видалено.</b>"
+        assert edit_calls[0].reply_markup is None
 
         # Check FSM cleared
         cleared_state = await dp.storage.get_state(key=key)

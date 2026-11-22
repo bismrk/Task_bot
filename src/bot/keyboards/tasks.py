@@ -15,8 +15,11 @@ def get_task_confirmation_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Generate inline keyboard for task confirmation with max 2 buttons per row.
 
     Buttons:
-    - [✅ Зберегти] (action="save", user_id=user_id)
-    - [✏️ Виправити] (action="edit", user_id=user_id)
+    - Row 1:
+      - [✅ Зберегти] (action="save", user_id=user_id)
+      - [✏️ Виправити] (action="edit", user_id=user_id)
+    - Row 2:
+      - [🗑️ Видалити] (action="delete", user_id=user_id)
     """
     save_button = InlineKeyboardButton(
         text="✅ Зберегти",
@@ -26,4 +29,13 @@ def get_task_confirmation_keyboard(user_id: int) -> InlineKeyboardMarkup:
         text="✏️ Виправити",
         callback_data=TaskConfirmCallback(action="edit", user_id=user_id).pack(),
     )
-    return InlineKeyboardMarkup(inline_keyboard=[[save_button, edit_button]])
+    delete_button = InlineKeyboardButton(
+        text="🗑️ Видалити",
+        callback_data=TaskConfirmCallback(action="delete", user_id=user_id).pack(),
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [save_button, edit_button],
+            [delete_button],
+        ]
+    )

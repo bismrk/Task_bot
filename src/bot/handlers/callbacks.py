@@ -24,7 +24,7 @@ async def task_confirm_callback(
     session: AsyncSession,
     state: FSMContext,
 ) -> None:
-    """Handle task confirmation actions (save or edit) with tenant security enforcement.
+    """Handle task confirmation actions (save, edit, delete) with tenant security enforcement.
 
     Verifies REQ-AI-03, REQ-TSK-01, REQ-NFR-02:
     - Rejects callback if from_user.id does not match callback_data.user_id with alert.
@@ -38,6 +38,10 @@ async def task_confirm_callback(
       - Clears FSM state.
       - Edits message to prompt user for new input and removes keyboard.
       - Answers callback.
+    - If action == 'delete':
+      - Clears FSM state via state.clear().
+      - If message is a Message instance, edits message text to cancellation notice and removes keyboard.
+      - Answers callback with cancellation notification ("Скасовано!").
     """
     if callback_query.from_user is None:
         return
@@ -88,6 +92,16 @@ async def task_confirm_callback(
                 reply_markup=None,
             )
         await callback_query.answer()
+        return
+
+    if callback_data.action == "delete":
+        await state.clear()
+        if callback_query.message and isinstance(callback_query.message, Message):
+            await callback_query.message.edit_text(
+                text="🗑️ <b>Завдання скасовано та видалено.</b>",
+                reply_markup=None,
+            )
+        await callback_query.answer("Скасовано!")
         return
 
     await callback_query.answer()
