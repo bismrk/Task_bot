@@ -8,7 +8,7 @@ Verifies:
 - REQ-NFR-03: Restart-resilient idempotency tracking via database dates.
 """
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from unittest.mock import AsyncMock
 
 from aiogram.exceptions import TelegramForbiddenError
@@ -21,6 +21,8 @@ from src.models.user import User
 from src.scheduler.jobs import (
     process_user_midnight_rollover,
     process_user_morning_push,
+    process_user_periodic_reminder,
+    run_deadline_checks,
     run_timezone_checks,
 )
 from src.scheduler.manager import (
@@ -610,3 +612,428 @@ async def test_scheduler_lifecycle_and_configuration(
     stop_scheduler(scheduler, wait=False)
     await asyncio.sleep(0)
     assert scheduler.running is False
+
+
+# ============================================================================
+# Periodic Telegram Reminder Tests (Issue #24)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_morning_push_anchors_periodic_reminder_timestamp(
+    db_session: AsyncSession,
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #24: 09:00 morning push stamps last_periodic_reminder_at and anchors 4h cadence to 13:00/17:00/21:00."""
+    user = User(
+        telegram_id=7001,
+        timezone="Europe/Kyiv",
+        reminder_interval_hours=4,
+    )
+    db_session.add(user)
+    today = date(2026, 11, 21)
+    db_session.add(
+        Task(
+            user_id=7001,
+            title="Підготувати презентацію",
+            target_date=today,
+            status=TaskStatus.todo,
+        )
+    )
+    await db_session.commit()
+
+    # 09:00 Kyiv = 07:00 UTC
+    t_0900_utc = datetime(2026, 11, 21, 7, 0, 0, tzinfo=timezone.utc)
+    morning_ok = await process_user_morning_push(mock_bot, db_session, user, now_dt=t_0900_utc)
+    assert morning_ok is True
+    assert user.last_periodic_reminder_at is not None
+    assert user.last_periodic_reminder_at.replace(tzinfo=timezone.utc) == t_0900_utc
+
+    # At 09:00, periodic reminder must NOT double-send
+    assert await process_user_periodic_reminder(mock_bot, db_session, user, now_dt=t_0900_utc) is False
+
+    # 10:00, 11:00, 12:00 Kyiv -> not yet 4h elapsed
+    for local_h in (10, 11, 12):
+        utc_dt = datetime(2026, 11, 21, local_h - 2, 0, 0, tzinfo=timezone.utc)
+        assert await process_user_periodic_reminder(mock_bot, db_session, user, now_dt=utc_dt) is False
+
+    # 13:00 Kyiv (11:00 UTC) -> 4h elapsed -> fires!
+    t_1300_utc = datetime(2026, 11, 21, 11, 0, 0, tzinfo=timezone.utc)
+    assert await process_user_periodic_reminder(mock_bot, db_session, user, now_dt=t_1300_utc) is True
+    assert mock_bot.send_message.call_count == 2  # 1 morning + 1 periodic
+
+    # 17:00 Kyiv (15:00 UTC) -> fires!
+    t_1700_utc = datetime(2026, 11, 21, 15, 0, 0, tzinfo=timezone.utc)
+    assert await process_user_periodic_reminder(mock_bot, db_session, user, now_dt=t_1700_utc) is True
+    assert mock_bot.send_message.call_count == 3
+
+    # 21:00 Kyiv (19:00 UTC) -> fires!
+    t_2100_utc = datetime(2026, 11, 21, 19, 0, 0, tzinfo=timezone.utc)
+    assert await process_user_periodic_reminder(mock_bot, db_session, user, now_dt=t_2100_utc) is True
+    assert mock_bot.send_message.call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_periodic_reminder_disabled_sends_nothing(
+    db_session: AsyncSession,
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #24: reminder_interval_hours=None disables periodic reminders."""
+    user = User(
+        telegram_id=7002,
+        timezone="Europe/Kyiv",
+        reminder_interval_hours=None,
+    )
+    db_session.add(user)
+    db_session.add(
+        Task(
+            user_id=7002,
+            title="Завдання",
+            target_date=date(2026, 11, 21),
+            status=TaskStatus.todo,
+        )
+    )
+    await db_session.commit()
+
+    # 13:00 Kyiv
+    t_1300_utc = datetime(2026, 11, 21, 11, 0, 0, tzinfo=timezone.utc)
+    triggered = await process_user_periodic_reminder(mock_bot, db_session, user, now_dt=t_1300_utc)
+    assert triggered is False
+    assert mock_bot.send_message.call_count == 0
+    assert user.last_periodic_reminder_at is None
+
+
+@pytest.mark.asyncio
+async def test_periodic_reminder_active_hours_quiet_hours_and_intervals(
+    db_session: AsyncSession,
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #24: quiet hours 23:00-07:59, non-zero minutes, 09:00 skip, and fallback schedule."""
+    today = date(2026, 11, 21)
+
+    # 1h interval user with no prior timestamp
+    u_1h = User(telegram_id=7003, timezone="UTC", reminder_interval_hours=1)
+    # 18h (>13) interval user with no prior timestamp
+    u_18h = User(telegram_id=7004, timezone="UTC", reminder_interval_hours=18)
+    db_session.add_all([u_1h, u_18h])
+    db_session.add_all(
+        [
+            Task(user_id=7003, title="Task 1h", target_date=today, status=TaskStatus.todo),
+            Task(user_id=7004, title="Task 18h", target_date=today, status=TaskStatus.todo),
+        ]
+    )
+    await db_session.commit()
+
+    # Quiet hours & off-minute must NEVER trigger
+    for dt in (
+        datetime(2026, 11, 21, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 11, 21, 7, 0, tzinfo=timezone.utc),
+        datetime(2026, 11, 21, 23, 0, tzinfo=timezone.utc),
+        datetime(2026, 11, 21, 13, 1, tzinfo=timezone.utc),
+        datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc),  # 09:00 owned by morning push
+    ):
+        assert await process_user_periodic_reminder(mock_bot, db_session, u_1h, now_dt=dt) is False
+
+    # 08:00 UTC triggers for 1h user
+    t_0800 = datetime(2026, 11, 21, 8, 0, tzinfo=timezone.utc)
+    assert await process_user_periodic_reminder(mock_bot, db_session, u_1h, now_dt=t_0800) is True
+
+    # For interval > 13 (18h) with last_periodic_reminder_at=None: only 21:00 triggers
+    assert (
+        await process_user_periodic_reminder(
+            mock_bot, db_session, u_18h, now_dt=datetime(2026, 11, 21, 13, 0, tzinfo=timezone.utc)
+        )
+        is False
+    )
+    assert (
+        await process_user_periodic_reminder(
+            mock_bot, db_session, u_18h, now_dt=datetime(2026, 11, 21, 21, 0, tzinfo=timezone.utc)
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_periodic_reminder_skips_when_zero_todo_tasks(
+    db_session: AsyncSession,
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #24: zero uncompleted tasks skips sending and leaves last_periodic_reminder_at unchanged."""
+    today = date(2026, 11, 21)
+    user = User(telegram_id=7005, timezone="Europe/Kyiv", reminder_interval_hours=4)
+    db_session.add(user)
+    db_session.add_all(
+        [
+            Task(user_id=7005, title="Вже виконане", target_date=today, status=TaskStatus.done),
+            Task(user_id=7005, title="Скасоване", target_date=today, status=TaskStatus.canceled),
+        ]
+    )
+    await db_session.commit()
+
+    t_1300_utc = datetime(2026, 11, 21, 11, 0, 0, tzinfo=timezone.utc)
+    triggered = await process_user_periodic_reminder(mock_bot, db_session, user, now_dt=t_1300_utc)
+    assert triggered is False
+    assert mock_bot.send_message.call_count == 0
+    assert user.last_periodic_reminder_at is None
+
+
+@pytest.mark.asyncio
+async def test_periodic_reminder_formatting_escaping_recurring_and_webapp_keyboard(
+    db_session: AsyncSession,
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #24: HTML message format, escaping, local deadline, recurring generation, and keyboard."""
+    today = date(2026, 11, 21)
+    user = User(telegram_id=7006, timezone="Europe/Kyiv", reminder_interval_hours=4)
+    db_session.add(user)
+
+    # Task with HTML special chars, tag, and deadline (16:00 UTC = 18:00 Kyiv)
+    db_session.add(
+        Task(
+            user_id=7006,
+            title="Перевірити <API> & логи",
+            target_date=today,
+            priority=TaskPriority.high,
+            tag="#робота",
+            deadline_at=datetime(2026, 11, 21, 16, 0, 0, tzinfo=timezone.utc),
+            status=TaskStatus.todo,
+        )
+    )
+    # Daily recurring task from yesterday -> must be auto-generated for today
+    db_session.add(
+        Task(
+            user_id=7006,
+            title="Випити воду",
+            target_date=date(2026, 11, 20),
+            recurrence="daily",
+            priority=TaskPriority.low,
+            status=TaskStatus.done,
+        )
+    )
+    await db_session.commit()
+
+    # 13:00 Kyiv = 11:00 UTC
+    t_1300_utc = datetime(2026, 11, 21, 11, 0, 0, tzinfo=timezone.utc)
+    triggered = await process_user_periodic_reminder(
+        bot=mock_bot,
+        session=db_session,
+        user=user,
+        webapp_url="https://app.tasks.internal",
+        now_dt=t_1300_utc,
+    )
+    assert triggered is True
+    assert mock_bot.send_message.call_count == 1
+
+    call = mock_bot.send_message.call_args
+    assert call.kwargs["chat_id"] == 7006
+    assert call.kwargs["parse_mode"] == "HTML"
+    text = call.kwargs["text"]
+    assert "🔔 <b>Нагадування про завдання на сьогодні:</b>" in text
+    assert "2" in text
+    assert "• Перевірити &lt;API&gt; &amp; логи — ⚠️ Високий | 🏷️ #робота | 🕒 до 18:00" in text
+    assert "• Випити воду — 💤 Низький" in text
+
+    reply_markup = call.kwargs["reply_markup"]
+    assert reply_markup.inline_keyboard[0][0].text == "🚀 Відкрити план"
+    assert reply_markup.inline_keyboard[0][0].web_app.url == "https://app.tasks.internal"
+
+
+@pytest.mark.asyncio
+async def test_periodic_reminder_elapsed_time_naive_sqlite_and_jitter_tolerance(
+    db_session: AsyncSession,
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #24: naive SQLite last_periodic_reminder_at normalization, 1m jitter tolerance, and idempotency."""
+    today = date(2026, 11, 21)
+    # Naive datetime simulating value returned from SQLite (09:00:30 UTC -> 11:00:30 Kyiv)
+    user = User(
+        telegram_id=7007,
+        timezone="Europe/Kyiv",
+        reminder_interval_hours=4,
+        last_periodic_reminder_at=datetime(2026, 11, 21, 9, 0, 30),  # naive UTC
+    )
+    db_session.add(user)
+    db_session.add(
+        Task(user_id=7007, title="Тестова задача", target_date=today, status=TaskStatus.todo)
+    )
+    await db_session.commit()
+
+    # 13:00:00 UTC (15:00 Kyiv) -> elapsed = 3h 59m 30s >= 3h 59m (239m) -> triggers!
+    t_1300_utc = datetime(2026, 11, 21, 13, 0, 0, tzinfo=timezone.utc)
+    assert await process_user_periodic_reminder(mock_bot, db_session, user, now_dt=t_1300_utc) is True
+    assert mock_bot.send_message.call_count == 1
+
+    # Repeated invocation in the same minute (e.g. restart) -> idempotent, does not resend
+    assert await process_user_periodic_reminder(mock_bot, db_session, user, now_dt=t_1300_utc) is False
+    assert mock_bot.send_message.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_periodic_reminder_interval_change_4h_to_2h_and_back(
+    db_session: AsyncSession,
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #24: changing interval from 4h to 2h takes effect on the next eligible hour without reset."""
+    today = date(2026, 11, 21)
+    user = User(telegram_id=7008, timezone="Europe/Kyiv", reminder_interval_hours=4)
+    db_session.add(user)
+    db_session.add(
+        Task(user_id=7008, title="Важливе завдання", target_date=today, status=TaskStatus.todo)
+    )
+    await db_session.commit()
+
+    # 09:00 Kyiv (07:00 UTC) morning push stamps last_periodic_reminder_at
+    await process_user_morning_push(
+        mock_bot,
+        db_session,
+        user,
+        now_dt=datetime(2026, 11, 21, 7, 0, 0, tzinfo=timezone.utc),
+    )
+
+    # User switches interval from 4h to 2h
+    user.reminder_interval_hours = 2
+    await db_session.commit()
+
+    # 11:00 Kyiv (09:00 UTC) -> 2h elapsed -> triggers immediately!
+    assert (
+        await process_user_periodic_reminder(
+            mock_bot,
+            db_session,
+            user,
+            now_dt=datetime(2026, 11, 21, 9, 0, 0, tzinfo=timezone.utc),
+        )
+        is True
+    )
+
+    # User switches back to 4h -> 13:00 Kyiv (2h later) must NOT trigger; 15:00 Kyiv (4h later) MUST trigger
+    user.reminder_interval_hours = 4
+    await db_session.commit()
+
+    assert (
+        await process_user_periodic_reminder(
+            mock_bot,
+            db_session,
+            user,
+            now_dt=datetime(2026, 11, 21, 11, 0, 0, tzinfo=timezone.utc),
+        )
+        is False
+    )
+    assert (
+        await process_user_periodic_reminder(
+            mock_bot,
+            db_session,
+            user,
+            now_dt=datetime(2026, 11, 21, 13, 0, 0, tzinfo=timezone.utc),
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_timezone_checks_periodic_blocked_and_error_isolation(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #24: run_timezone_checks tracks periodic_triggered, handles TelegramForbiddenError, and isolates errors."""
+    today = date(2026, 11, 21)
+    u_blocked = User(telegram_id=7101, timezone="Europe/Kyiv", reminder_interval_hours=4)
+    u_ok = User(telegram_id=7102, timezone="Europe/Kyiv", reminder_interval_hours=4)
+    u_fail = User(telegram_id=7103, timezone="Europe/Kyiv", reminder_interval_hours=4)
+    db_session.add_all([u_blocked, u_ok, u_fail])
+    db_session.add_all(
+        [
+            Task(user_id=7101, title="Task blocked", target_date=today, status=TaskStatus.todo),
+            Task(user_id=7102, title="Task ok", target_date=today, status=TaskStatus.todo),
+            Task(user_id=7103, title="Task fail", target_date=today, status=TaskStatus.todo),
+        ]
+    )
+    await db_session.commit()
+
+    async def fake_send(chat_id, **kwargs):
+        if chat_id == 7101:
+            raise TelegramForbiddenError(
+                method="sendMessage",
+                message="Forbidden: bot was blocked by the user",
+            )
+        if chat_id == 7103:
+            raise RuntimeError("Transient network failure")
+        return AsyncMock(message_id=200)
+
+    mock_bot.send_message.side_effect = fake_send
+
+    # 13:00 Kyiv = 11:00 UTC
+    t_1300_utc = datetime(2026, 11, 21, 11, 0, 0, tzinfo=timezone.utc)
+    stats = await run_timezone_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        reference_time=t_1300_utc,
+    )
+
+    assert stats["midnight_triggered"] == 0
+    assert stats["morning_triggered"] == 0
+    assert stats["periodic_triggered"] == 1
+    assert stats["errors"] == 1  # Only u_fail counts as error; u_blocked is handled cleanly
+
+    async with session_factory() as s:
+        ref_blocked = await s.get(User, 7101)
+        ref_ok = await s.get(User, 7102)
+        ref_fail = await s.get(User, 7103)
+
+        assert ref_blocked.last_periodic_reminder_at is not None
+        assert ref_ok.last_periodic_reminder_at is not None
+        assert ref_fail.last_periodic_reminder_at is None
+
+
+@pytest.mark.asyncio
+async def test_deadline_alerts_still_fire_when_periodic_reminders_disabled(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #24: -1h and -10m deadline alerts still fire when reminder_interval_hours is None."""
+    user = User(
+        telegram_id=7201,
+        timezone="Europe/Kyiv",
+        reminder_interval_hours=None,
+    )
+    db_session.add(user)
+    await db_session.commit()
+
+    now_utc = datetime(2026, 11, 21, 11, 0, 0, tzinfo=timezone.utc)  # 13:00 Kyiv
+    task_1h = Task(
+        user_id=7201,
+        title="Дедлайн за годину",
+        target_date=now_utc.date(),
+        deadline_at=now_utc + timedelta(minutes=45),
+        status=TaskStatus.todo,
+    )
+    task_10m = Task(
+        user_id=7201,
+        title="Дедлайн за 10 хвилин",
+        target_date=now_utc.date(),
+        deadline_at=now_utc + timedelta(minutes=8),
+        status=TaskStatus.todo,
+    )
+    db_session.add_all([task_1h, task_10m])
+    await db_session.commit()
+
+    # Periodic reminders must NOT fire
+    tz_stats = await run_timezone_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        reference_time=now_utc,
+    )
+    assert tz_stats["periodic_triggered"] == 0
+    assert mock_bot.send_message.call_count == 0
+
+    # Deadline alerts (-1h and -10m) MUST still fire
+    dl_stats = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=now_utc,
+    )
+    assert dl_stats["reminders_1h_sent"] == 1
+    assert dl_stats["reminders_10m_sent"] == 1
+    assert dl_stats["errors"] == 0
+    assert mock_bot.send_message.call_count == 2

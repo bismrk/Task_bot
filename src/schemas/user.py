@@ -54,6 +54,27 @@ class TimezoneUpdate(BaseModel):
         return _validate_timezone(v)
 
 
+class ReminderIntervalUpdate(BaseModel):
+    """Schema for updating user periodic reminder interval."""
+
+    reminder_interval_hours: int | None
+
+    @field_validator("reminder_interval_hours", mode="before")
+    @classmethod
+    def validate_reminder_interval(cls, v: object) -> int | None:
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ValueError(
+                "reminder_interval_hours must be an integer between 1 and 24, or null"
+            )
+        if v < 1 or v > 24:
+            raise ValueError(
+                "reminder_interval_hours must be between 1 and 24, or null"
+            )
+        return v
+
+
 class UserRead(UserBase):
     """User read schema for serializing user records from database or API."""
 
@@ -61,4 +82,5 @@ class UserRead(UserBase):
 
     telegram_id: int
     timezone: str
+    reminder_interval_hours: int | None = 4
     created_at: datetime

@@ -223,3 +223,139 @@ async def test_get_session_context_manager() -> None:
         assert isinstance(session, AsyncSession)
         result = await session.execute(text("SELECT 1;"))
         assert result.scalar() == 1
+
+
+@pytest.mark.asyncio
+async def test_user_reminder_interval_defaults_and_explicit_null(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #24: User defaults to 4h interval & None timestamp; explicit None persists as SQL NULL."""
+    default_user = User(telegram_id=700001)
+    disabled_user = User(telegram_id=700002, reminder_interval_hours=None)
+    custom_user = User(telegram_id=700003, reminder_interval_hours=8)
+
+    assert default_user.reminder_interval_hours == 4
+    assert disabled_user.reminder_interval_hours is None
+    assert custom_user.reminder_interval_hours == 8
+
+    db_session.add_all([default_user, disabled_user, custom_user])
+    await db_session.commit()
+    await db_session.refresh(default_user)
+    await db_session.refresh(disabled_user)
+    await db_session.refresh(custom_user)
+
+    assert default_user.reminder_interval_hours == 4
+    assert default_user.last_periodic_reminder_at is None
+    assert disabled_user.reminder_interval_hours is None
+    assert custom_user.reminder_interval_hours == 8
+
+    # Confirm raw SQLite values
+    rows = (
+        await db_session.execute(
+            text(
+                "SELECT telegram_id, reminder_interval_hours, last_periodic_reminder_at "
+                "FROM users WHERE telegram_id IN (700001, 700002, 700003) ORDER BY telegram_id"
+            )
+        )
+    ).fetchall()
+    assert rows == [
+        (700001, 4, None),
+        (700002, None, None),
+        (700003, 8, None),
+    ]
+
+    # Disabling reminders on an existing user persists as NULL
+    default_user.reminder_interval_hours = None
+    await db_session.commit()
+    val = (
+        await db_session.execute(
+            text("SELECT reminder_interval_hours FROM users WHERE telegram_id = 700001")
+        )
+    ).scalar()
+    assert val is None
+
+
+@pytest.mark.asyncio
+async def test_init_db_migrates_legacy_users_table_idempotently(tmp_path) -> None:
+    """Verifies Issue #24: init_db safely adds missing reminder columns, backfills 4, and is idempotent."""
+    db_file = tmp_path / "legacy.db"
+    legacy_engine = create_db_engine(f"sqlite+aiosqlite:///{db_file}")
+
+    # Create legacy schema without reminder_interval_hours and last_periodic_reminder_at
+    async with legacy_engine.begin() as conn:
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE users (
+                    telegram_id BIGINT PRIMARY KEY NOT NULL,
+                    timezone VARCHAR NOT NULL DEFAULT 'Europe/Kyiv',
+                    created_at DATETIME NOT NULL,
+                    last_midnight_review_date DATE,
+                    last_morning_push_date DATE
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                INSERT INTO users (telegram_id, timezone, created_at)
+                VALUES
+                    (800001, 'Europe/Kyiv', '2026-11-01 08:00:00'),
+                    (800002, 'America/New_York', '2026-11-02 09:00:00')
+                """
+            )
+        )
+
+    # First migration run
+    await init_db(engine=legacy_engine)
+
+    async with legacy_engine.connect() as conn:
+        cols = {
+            row[1]
+            for row in (await conn.execute(text("PRAGMA table_info(users)"))).fetchall()
+        }
+        assert "reminder_interval_hours" in cols
+        assert "last_periodic_reminder_at" in cols
+
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT telegram_id, timezone, reminder_interval_hours, last_periodic_reminder_at "
+                    "FROM users ORDER BY telegram_id"
+                )
+            )
+        ).fetchall()
+        assert rows == [
+            (800001, "Europe/Kyiv", 4, None),
+            (800002, "America/New_York", 4, None),
+        ]
+
+    # Set custom values including NULL
+    async with legacy_engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE users SET reminder_interval_hours = NULL WHERE telegram_id = 800001")
+        )
+        await conn.execute(
+            text("UPDATE users SET reminder_interval_hours = 2 WHERE telegram_id = 800002")
+        )
+
+    # Repeated runs must succeed without errors and preserve custom & NULL values
+    await init_db(engine=legacy_engine)
+    await init_db(engine=legacy_engine)
+
+    async with legacy_engine.connect() as conn:
+        rows_after = (
+            await conn.execute(
+                text(
+                    "SELECT telegram_id, reminder_interval_hours "
+                    "FROM users ORDER BY telegram_id"
+                )
+            )
+        ).fetchall()
+        assert rows_after == [
+            (800001, None),
+            (800002, 2),
+        ]
+
+    await legacy_engine.dispose()

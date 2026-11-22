@@ -1,6 +1,6 @@
 """Timezone-aware background scheduler jobs and per-user triggers."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import html
 import logging
 from zoneinfo import ZoneInfo
@@ -22,6 +22,15 @@ from src.services.task_service import (
 from src.services.user_service import get_user_local_time
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_utc(dt: datetime | None) -> datetime:
+    """Normalize a datetime to timezone-aware UTC (treating None as utcnow and naive as UTC)."""
+    if dt is None:
+        return datetime.now(timezone.utc)
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 async def process_user_midnight_rollover(
@@ -92,7 +101,8 @@ async def process_user_morning_push(
     Returns:
         True if the morning push was triggered, False otherwise.
     """
-    local_time = get_user_local_time(user, now_dt)
+    now_utc = _normalize_utc(now_dt)
+    local_time = get_user_local_time(user, now_utc)
 
     # Check if local time is in 09:00 window
     if not (local_time.hour == 9 and local_time.minute == 0):
@@ -173,8 +183,122 @@ async def process_user_morning_push(
         parse_mode="HTML",
     )
 
-    # Update idempotency tracking and commit transaction
+    # Update idempotency tracking and anchor periodic reminders to 09:00
     user.last_morning_push_date = today
+    user.last_periodic_reminder_at = now_utc
+    await session.commit()
+    return True
+
+
+async def process_user_periodic_reminder(
+    bot: Bot,
+    session: AsyncSession,
+    user: User,
+    webapp_url: str | None = None,
+    now_dt: datetime | None = None,
+) -> bool:
+    """Process periodic uncompleted task reminder for a single user.
+
+    Evaluates at the top of the user's local hour within the active window 08:00-22:59,
+    skipping 09:00 (owned by process_user_morning_push). Sends an HTML-formatted list
+    of uncompleted (`todo`) tasks for today via Telegram bot if at least one exists.
+
+    Args:
+        bot: aiogram Bot instance.
+        session: Active SQLAlchemy async session.
+        user: User record.
+        webapp_url: Optional base URL for Telegram Mini App.
+        now_dt: Optional reference datetime for simulation/testing.
+
+    Returns:
+        True if a periodic reminder was sent, False otherwise.
+    """
+    interval = user.reminder_interval_hours
+    if interval is None or interval <= 0:
+        return False
+
+    now_utc = _normalize_utc(now_dt)
+    local_time = get_user_local_time(user, now_utc)
+
+    # Only evaluate at the top of the local hour within 08:00-22:59, skipping 09:00
+    if local_time.minute != 0:
+        return False
+    if not (8 <= local_time.hour <= 22):
+        return False
+    if local_time.hour == 9:
+        return False
+
+    # Exact deterministic trigger & idempotency rule
+    if user.last_periodic_reminder_at is not None:
+        last_sent_utc = _normalize_utc(user.last_periodic_reminder_at)
+        if (now_utc - last_sent_utc) < timedelta(minutes=interval * 60 - 1):
+            return False
+    else:
+        if interval <= 13:
+            if (local_time.hour - 9) % interval != 0:
+                return False
+        else:
+            if local_time.hour != 21:
+                return False
+
+    today = local_time.date()
+
+    # 1. Populate recurring tasks for today before checking uncompleted tasks
+    await ensure_recurring_tasks_for_date(
+        session=session,
+        user_id=user.telegram_id,
+        target_date=today,
+    )
+
+    # 2. Query today's tasks and filter to uncompleted (todo)
+    tasks = await get_tasks_for_date(
+        session=session,
+        user_id=user.telegram_id,
+        target_date=today,
+    )
+    todo_tasks = [t for t in tasks if t.status == TaskStatus.todo]
+    if not todo_tasks:
+        return False
+
+    # 3. Format HTML message complying with _docs/design-system.md
+    lines = [
+        "🔔 <b>Нагадування про завдання на сьогодні:</b>\n",
+        f"У вас залишилось {len(todo_tasks)} невиконаних завдань на сьогодні:",
+    ]
+    user_tz = ZoneInfo(user.timezone)
+    for task in todo_tasks:
+        meta_parts: list[str] = []
+
+        if task.priority == TaskPriority.high:
+            meta_parts.append("⚠️ Високий")
+        elif task.priority == TaskPriority.low:
+            meta_parts.append("💤 Низький")
+        else:
+            meta_parts.append("⚡ Середній")
+
+        if task.tag:
+            clean_tag = html.escape(task.tag.lstrip("#"))
+            meta_parts.append(f"🏷️ #{clean_tag}")
+
+        if task.deadline_at:
+            deadline_local = _normalize_utc(task.deadline_at).astimezone(user_tz)
+            meta_parts.append(f"🕒 до {deadline_local.strftime('%H:%M')}")
+
+        meta_str = " | ".join(meta_parts)
+        escaped_title = html.escape(task.title)
+        lines.append(f"• {escaped_title} — {meta_str}")
+
+    text = "\n".join(lines)
+    keyboard = get_start_keyboard(webapp_url=webapp_url)
+
+    await bot.send_message(
+        chat_id=user.telegram_id,
+        text=text,
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
+
+    user.last_periodic_reminder_at = now_utc
     await session.commit()
     return True
 
@@ -189,8 +313,8 @@ async def run_timezone_checks(
 
     Opens an async database session using sessionmaker(), queries all registered users,
     and iterates over each user with per-user exception isolation (REQ-NFR-02).
-    Handles TelegramForbiddenError (blocked bot) by marking the trigger date to avoid
-    repeated retries in the same minute and continuing cleanly.
+    Handles TelegramForbiddenError (blocked bot) by marking the trigger date/timestamp
+    to avoid repeated retries in the same window and continuing cleanly.
     Rolls back on unexpected exceptions and records error counts.
 
     Args:
@@ -200,11 +324,17 @@ async def run_timezone_checks(
         reference_time: Optional reference datetime for simulation/testing.
 
     Returns:
-        dict[str, int]: {"midnight_triggered": int, "morning_triggered": int, "errors": int}
+        dict[str, int]: {
+            "midnight_triggered": int,
+            "morning_triggered": int,
+            "periodic_triggered": int,
+            "errors": int,
+        }
     """
     stats = {
         "midnight_triggered": 0,
         "morning_triggered": 0,
+        "periodic_triggered": 0,
         "errors": 0,
     }
 
@@ -239,14 +369,28 @@ async def run_timezone_checks(
                 if morning_triggered:
                     stats["morning_triggered"] += 1
 
+                periodic_triggered = await process_user_periodic_reminder(
+                    bot=bot,
+                    session=session,
+                    user=user,
+                    webapp_url=webapp_url,
+                    now_dt=reference_time,
+                )
+                if periodic_triggered:
+                    stats["periodic_triggered"] += 1
+
             except TelegramForbiddenError as e:
                 logger.warning("User %s has blocked the bot: %s", user.telegram_id, e)
                 try:
-                    local_time = get_user_local_time(user, reference_time)
+                    now_utc = _normalize_utc(reference_time)
+                    local_time = get_user_local_time(user, now_utc)
                     if local_time.hour == 0 and local_time.minute == 0:
                         user.last_midnight_review_date = local_time.date()
                     elif local_time.hour == 9 and local_time.minute == 0:
                         user.last_morning_push_date = local_time.date()
+                        user.last_periodic_reminder_at = now_utc
+                    elif 8 <= local_time.hour <= 22 and local_time.minute == 0:
+                        user.last_periodic_reminder_at = now_utc
                     await session.commit()
                 except Exception:
                     await session.rollback()
@@ -260,11 +404,15 @@ async def run_timezone_checks(
                         e,
                     )
                     try:
-                        local_time = get_user_local_time(user, reference_time)
+                        now_utc = _normalize_utc(reference_time)
+                        local_time = get_user_local_time(user, now_utc)
                         if local_time.hour == 0 and local_time.minute == 0:
                             user.last_midnight_review_date = local_time.date()
                         elif local_time.hour == 9 and local_time.minute == 0:
                             user.last_morning_push_date = local_time.date()
+                            user.last_periodic_reminder_at = now_utc
+                        elif 8 <= local_time.hour <= 22 and local_time.minute == 0:
+                            user.last_periodic_reminder_at = now_utc
                         await session.commit()
                     except Exception:
                         await session.rollback()

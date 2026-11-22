@@ -256,3 +256,186 @@ async def test_update_timezone_tenant_isolation(api_context) -> None:
             await session.execute(select(User).where(User.telegram_id == user_b_id))
         ).scalar_one()
         assert user_b.timezone == "Asia/Tokyo"
+
+
+# ============================================================================
+# Periodic Reminder Settings API Tests (Issue #24)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_user_endpoints_return_reminder_interval_hours(api_context) -> None:
+    """Verifies Issue #24: GET /api/me, PATCH /api/settings/timezone, PATCH /api/me/timezone include reminder_interval_hours."""
+    client, session_factory, settings = api_context
+    telegram_id = 30001
+    headers = get_auth_headers(telegram_id, settings.BOT_TOKEN)
+
+    async with session_factory() as session:
+        await get_or_create_user(session, telegram_id=telegram_id, timezone="Europe/Kyiv")
+
+    res_me = client.get("/api/me", headers=headers)
+    assert res_me.status_code == 200
+    assert res_me.json()["reminder_interval_hours"] == 4
+
+    res_tz = client.patch(
+        "/api/settings/timezone",
+        headers=headers,
+        json={"timezone": "Europe/Warsaw"},
+    )
+    assert res_tz.status_code == 200
+    assert res_tz.json()["reminder_interval_hours"] == 4
+
+    res_me_tz = client.patch(
+        "/api/me/timezone",
+        headers=headers,
+        json={"timezone": "UTC"},
+    )
+    assert res_me_tz.status_code == 200
+    assert res_me_tz.json()["reminder_interval_hours"] == 4
+
+
+@pytest.mark.asyncio
+async def test_update_reminders_success_and_disable(api_context) -> None:
+    """Verifies Issue #24: PATCH /api/settings/reminders updates interval (1..24) and disables (null)."""
+    client, session_factory, settings = api_context
+    telegram_id = 30002
+    headers = get_auth_headers(telegram_id, settings.BOT_TOKEN)
+
+    async with session_factory() as session:
+        await get_or_create_user(session, telegram_id=telegram_id, timezone="Europe/Kyiv")
+
+    # Set to 2 hours
+    res_2h = client.patch(
+        "/api/settings/reminders",
+        headers=headers,
+        json={"reminder_interval_hours": 2},
+    )
+    assert res_2h.status_code == 200
+    assert res_2h.json()["reminder_interval_hours"] == 2
+
+    # Set to upper bound 24 hours
+    res_24h = client.patch(
+        "/api/settings/reminders",
+        headers=headers,
+        json={"reminder_interval_hours": 24},
+    )
+    assert res_24h.status_code == 200
+    assert res_24h.json()["reminder_interval_hours"] == 24
+
+    # Disable (null)
+    res_null = client.patch(
+        "/api/settings/reminders",
+        headers=headers,
+        json={"reminder_interval_hours": None},
+    )
+    assert res_null.status_code == 200
+    assert res_null.json()["reminder_interval_hours"] is None
+
+    async with session_factory() as session:
+        user = (
+            await session.execute(select(User).where(User.telegram_id == telegram_id))
+        ).scalar_one()
+        assert user.reminder_interval_hours is None
+
+    # Confirm GET /api/me reflects NULL
+    res_me = client.get("/api/me", headers=headers)
+    assert res_me.status_code == 200
+    assert res_me.json()["reminder_interval_hours"] is None
+
+    # Re-enable to lower bound 1 hour
+    res_1h = client.patch(
+        "/api/settings/reminders",
+        headers=headers,
+        json={"reminder_interval_hours": 1},
+    )
+    assert res_1h.status_code == 200
+    assert res_1h.json()["reminder_interval_hours"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"reminder_interval_hours": 0},
+        {"reminder_interval_hours": -1},
+        {"reminder_interval_hours": 25},
+        {"reminder_interval_hours": True},
+        {"reminder_interval_hours": False},
+        {"reminder_interval_hours": 2.5},
+        {"reminder_interval_hours": 4.0},
+        {"reminder_interval_hours": "4"},
+        {"reminder_interval_hours": "abc"},
+    ],
+)
+async def test_update_reminders_invalid_payloads_return_422(api_context, payload) -> None:
+    """Verifies Issue #24: Invalid reminder interval payloads return HTTP 422 and keep DB unchanged."""
+    client, session_factory, settings = api_context
+    telegram_id = 30003
+    headers = get_auth_headers(telegram_id, settings.BOT_TOKEN)
+
+    async with session_factory() as session:
+        await get_or_create_user(session, telegram_id=telegram_id, timezone="Europe/Kyiv")
+
+    res = client.patch("/api/settings/reminders", headers=headers, json=payload)
+    assert res.status_code == 422
+
+    async with session_factory() as session:
+        user = (
+            await session.execute(select(User).where(User.telegram_id == telegram_id))
+        ).scalar_one()
+        assert user.reminder_interval_hours == 4
+
+
+@pytest.mark.asyncio
+async def test_update_reminders_unauthenticated_rejected(api_context) -> None:
+    """Verifies Issue #24: PATCH /api/settings/reminders returns 401 when auth is missing or forged."""
+    client, _session_factory, _settings = api_context
+
+    res_no_auth = client.patch(
+        "/api/settings/reminders",
+        json={"reminder_interval_hours": 2},
+    )
+    assert res_no_auth.status_code == 401
+
+    fake_init_data = create_test_init_data(
+        user_data={"id": 99999},
+        bot_token="wrong_bot_token",
+    )
+    res_forged = client.patch(
+        "/api/settings/reminders",
+        headers={"Authorization": f"tma {fake_init_data}"},
+        json={"reminder_interval_hours": 2},
+    )
+    assert res_forged.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_update_reminders_tenant_isolation(api_context) -> None:
+    """Verifies Issue #24: User A updating reminder interval cannot alter User B's setting."""
+    client, session_factory, settings = api_context
+    user_a_id = 30011
+    user_b_id = 30012
+
+    async with session_factory() as session:
+        await get_or_create_user(session, telegram_id=user_a_id, timezone="Europe/Kyiv")
+        await get_or_create_user(session, telegram_id=user_b_id, timezone="Europe/Kyiv")
+
+    headers_a = get_auth_headers(user_a_id, settings.BOT_TOKEN)
+    res = client.patch(
+        "/api/settings/reminders",
+        headers=headers_a,
+        json={"reminder_interval_hours": None},
+    )
+    assert res.status_code == 200
+    assert res.json()["reminder_interval_hours"] is None
+
+    async with session_factory() as session:
+        user_a = (
+            await session.execute(select(User).where(User.telegram_id == user_a_id))
+        ).scalar_one()
+        user_b = (
+            await session.execute(select(User).where(User.telegram_id == user_b_id))
+        ).scalar_one()
+        assert user_a.reminder_interval_hours is None
+        assert user_b.reminder_interval_hours == 4

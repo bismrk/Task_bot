@@ -4,7 +4,15 @@
 export interface UserProfile {
   telegram_id: number;
   timezone: string;
+  reminder_interval_hours: number | null;
   created_at: string;
+}
+
+/**
+ * Payload for updating periodic Telegram reminder interval.
+ */
+export interface ReminderIntervalUpdate {
+  reminder_interval_hours: number | null;
 }
 
 /**

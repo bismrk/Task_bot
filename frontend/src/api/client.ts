@@ -1,6 +1,7 @@
 import type {
   AnalyticsResponse,
   CalendarDaySummary,
+  ReminderIntervalUpdate,
   TaskCreate,
   TaskRead,
   TaskUpdate,
@@ -197,6 +198,21 @@ export async function updateTimezone(timezone: string): Promise<UserProfile> {
   return apiRequest<UserProfile>('/api/settings/timezone', {
     method: 'PATCH',
     body: JSON.stringify({ timezone }),
+  });
+}
+
+/**
+ * Update user periodic Telegram reminder interval preference (1..24 hours or null to disable).
+ */
+export async function updateReminderInterval(
+  reminderIntervalHours: number | null
+): Promise<UserProfile> {
+  const payload: ReminderIntervalUpdate = {
+    reminder_interval_hours: reminderIntervalHours,
+  };
+  return apiRequest<UserProfile>('/api/settings/reminders', {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
   });
 }
 

@@ -8,12 +8,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from zoneinfo import ZoneInfo
 
 from src.models.user import User
-from src.schemas.user import UserBase, UserCreate, UserRead, UserUpdate
+from src.schemas.user import (
+    ReminderIntervalUpdate,
+    UserBase,
+    UserCreate,
+    UserRead,
+    UserUpdate,
+)
 from src.services.user_service import (
     get_or_create_user,
     get_user,
     get_user_local_time,
+    update_user_reminder_interval,
     update_user_timezone,
+    validate_reminder_interval,
     validate_timezone,
 )
 
@@ -348,3 +356,121 @@ def test_pydantic_user_read_schema() -> None:
     with pytest.raises(ValidationError) as exc_info:
         UserRead(telegram_id=1, timezone="Moon/Base", created_at=now)
     assert "Invalid timezone: Moon/Base" in str(exc_info.value)
+
+
+# ============================================================================
+# Reminder Interval Validation, Service & Schema Tests (Issue #24)
+# ============================================================================
+
+
+def test_validate_reminder_interval_valid() -> None:
+    """Verifies Issue #24: validate_reminder_interval accepts None and integers 1..24."""
+    assert validate_reminder_interval(None) is None
+    for hours in range(1, 25):
+        assert validate_reminder_interval(hours) == hours
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    [0, -1, -24, 25, 100, True, False, 2.5, 4.0, "4", "abc"],
+)
+def test_validate_reminder_interval_invalid(invalid_value) -> None:
+    """Verifies Issue #24: validate_reminder_interval rejects 0, negatives, >24, booleans, floats, strings."""
+    with pytest.raises(ValueError):
+        validate_reminder_interval(invalid_value)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_update_user_reminder_interval_success_and_disable(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #24: update_user_reminder_interval updates, disables (NULL), and re-enables."""
+    telegram_id = 333444555
+    user, _ = await get_or_create_user(db_session, telegram_id)
+    assert user.reminder_interval_hours == 4
+
+    # Update to custom value 7
+    updated = await update_user_reminder_interval(db_session, telegram_id, 7)
+    assert updated.reminder_interval_hours == 7
+
+    # Disable (None)
+    disabled = await update_user_reminder_interval(db_session, telegram_id, None)
+    assert disabled.reminder_interval_hours is None
+
+    # Verify persisted NULL from fresh query
+    persisted = await get_user(db_session, telegram_id)
+    assert persisted is not None
+    assert persisted.reminder_interval_hours is None
+
+    # Re-enable to 24
+    reenabled = await update_user_reminder_interval(db_session, telegram_id, 24)
+    assert reenabled.reminder_interval_hours == 24
+
+
+@pytest.mark.asyncio
+async def test_update_user_reminder_interval_invalid_preserves_db(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #24: invalid reminder interval raises ValueError and leaves DB untouched."""
+    telegram_id = 333444556
+    await get_or_create_user(db_session, telegram_id)
+
+    for bad in (0, -3, 25, True, False):
+        with pytest.raises(ValueError):
+            await update_user_reminder_interval(db_session, telegram_id, bad)  # type: ignore[arg-type]
+
+    persisted = await get_user(db_session, telegram_id)
+    assert persisted is not None
+    assert persisted.reminder_interval_hours == 4
+
+
+@pytest.mark.asyncio
+async def test_update_user_reminder_interval_missing_user_raises(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #24: update_user_reminder_interval raises ValueError for non-existent user."""
+    with pytest.raises(ValueError, match="does not exist"):
+        await update_user_reminder_interval(db_session, 999888777, 2)
+
+
+def test_pydantic_reminder_interval_update_schema() -> None:
+    """Verifies Issue #24: ReminderIntervalUpdate accepts None and 1..24, rejects invalid values & missing key."""
+    assert ReminderIntervalUpdate(reminder_interval_hours=None).reminder_interval_hours is None
+    for hours in (1, 4, 12, 24):
+        assert ReminderIntervalUpdate(reminder_interval_hours=hours).reminder_interval_hours == hours
+
+    # Missing required field
+    with pytest.raises(ValidationError):
+        ReminderIntervalUpdate()  # type: ignore[call-arg]
+
+    # Out of bounds, booleans, floats, strings
+    for invalid in (0, -1, 25, True, False, 2.5, 4.0, "4", "abc"):
+        with pytest.raises(ValidationError):
+            ReminderIntervalUpdate(reminder_interval_hours=invalid)  # type: ignore[arg-type]
+
+
+def test_pydantic_user_read_reminder_interval_hours() -> None:
+    """Verifies Issue #24: UserRead defaults reminder_interval_hours to 4 and preserves None/custom from ORM."""
+    now = datetime.now(timezone.utc)
+
+    default_read = UserRead(telegram_id=1, timezone="Europe/Kyiv", created_at=now)
+    assert default_read.reminder_interval_hours == 4
+
+    disabled_read = UserRead(
+        telegram_id=2,
+        timezone="Europe/Kyiv",
+        reminder_interval_hours=None,
+        created_at=now,
+    )
+    assert disabled_read.reminder_interval_hours is None
+
+    orm_default = User(telegram_id=3, timezone="UTC", created_at=now)
+    assert UserRead.model_validate(orm_default).reminder_interval_hours == 4
+
+    orm_disabled = User(
+        telegram_id=4,
+        timezone="UTC",
+        reminder_interval_hours=None,
+        created_at=now,
+    )
+    assert UserRead.model_validate(orm_disabled).reminder_interval_hours is None

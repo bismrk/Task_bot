@@ -4,7 +4,7 @@ import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -71,7 +71,23 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db(engine: AsyncEngine | None = None) -> None:
-    """Create all database tables in metadata."""
+    """Create all database tables in metadata and run idempotent SQLite column migrations."""
     target_engine = engine if engine is not None else globals()["engine"]
     async with target_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        result = await conn.execute(text("PRAGMA table_info(users)"))
+        existing_columns = {row[1] for row in result.fetchall()}
+
+        if "reminder_interval_hours" not in existing_columns:
+            await conn.execute(
+                text(
+                    "ALTER TABLE users ADD COLUMN reminder_interval_hours INTEGER DEFAULT 4"
+                )
+            )
+        if "last_periodic_reminder_at" not in existing_columns:
+            await conn.execute(
+                text(
+                    "ALTER TABLE users ADD COLUMN last_periodic_reminder_at DATETIME"
+                )
+            )

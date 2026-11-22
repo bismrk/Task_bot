@@ -114,6 +114,61 @@ async def update_user_timezone(
     return user
 
 
+def validate_reminder_interval(interval: int | None) -> int | None:
+    """Validate a periodic reminder interval in hours (1..24) or None (disabled).
+
+    Args:
+        interval: The reminder interval in hours (1..24) or None.
+
+    Returns:
+        The validated interval or None.
+
+    Raises:
+        ValueError: If the interval is a boolean, not an integer, or outside 1..24.
+    """
+    if interval is None:
+        return None
+    if isinstance(interval, bool) or not isinstance(interval, int):
+        raise ValueError(
+            f"Invalid reminder interval: {interval}. Must be an integer between 1 and 24, or None."
+        )
+    if interval < 1 or interval > 24:
+        raise ValueError(
+            f"Invalid reminder interval: {interval}. Must be between 1 and 24 hours."
+        )
+    return interval
+
+
+async def update_user_reminder_interval(
+    session: AsyncSession,
+    telegram_id: int,
+    reminder_interval_hours: int | None,
+) -> User:
+    """Update a user's periodic reminder interval preference and commit the transaction.
+
+    Args:
+        session: Active SQLAlchemy async session.
+        telegram_id: Telegram user ID.
+        reminder_interval_hours: Interval in hours (1..24) or None to disable.
+
+    Returns:
+        The updated User record.
+
+    Raises:
+        ValueError: If the interval is invalid or no user with telegram_id exists.
+    """
+    validated_interval = validate_reminder_interval(reminder_interval_hours)
+
+    user = await get_user(session, telegram_id)
+    if user is None:
+        raise ValueError(f"User with telegram_id {telegram_id} does not exist")
+
+    user.reminder_interval_hours = validated_interval
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+
 def get_user_local_time(user: User, dt: datetime | None = None) -> datetime:
     """Return a timezone-aware datetime in the user's local timezone.
 
