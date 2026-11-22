@@ -56,11 +56,11 @@ def validate_init_data(
             try:
                 user_obj = json.loads(user_raw)
                 if not isinstance(user_obj, dict) or "id" not in user_obj:
-                    user_obj = {"id": 1396728720, "first_name": "DevUser"}
+                    user_obj = {"id": 123456789, "first_name": "DevUser"}
             except Exception:
-                user_obj = {"id": 1396728720, "first_name": "DevUser"}
+                user_obj = {"id": 123456789, "first_name": "DevUser"}
         else:
-            user_obj = {"id": 1396728720, "first_name": "DevUser"}
+            user_obj = {"id": 123456789, "first_name": "DevUser"}
         result_data: dict[str, Any] = dict(parsed_dict)
         result_data["user"] = user_obj
         return result_data

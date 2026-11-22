@@ -60,7 +60,7 @@ export function getInitData(): string {
     if (tgInitData && tgInitData.trim().length > 0) {
       return tgInitData.trim();
     }
-    const customUserId = urlParams.get('user_id') || localStorage.getItem('dev_user_id') || '1396728720';
+    const customUserId = urlParams.get('user_id') || localStorage.getItem('dev_user_id') || '123456789';
     const authDate = Math.floor(Date.now() / 1000);
     return `query_id=mock_query_id&user=%7B%22id%22%3A${customUserId}%2C%22first_name%22%3A%22DevUser%22%2C%22username%22%3A%22devuser%22%7D&auth_date=${authDate}&hash=mock_dev_hash`;
   }
@@ -73,7 +73,7 @@ export function getInitData(): string {
 
   // 4. Fallback mock credentials for browser development outside Telegram
   const authDate = Math.floor(Date.now() / 1000);
-  return `query_id=mock_query_id&user=%7B%22id%22%3A1396728720%2C%22first_name%22%3A%22DevUser%22%2C%22username%22%3A%22devuser%22%7D&auth_date=${authDate}&hash=mock_dev_hash`;
+  return `query_id=mock_query_id&user=%7B%22id%22%3A123456789%2C%22first_name%22%3A%22DevUser%22%2C%22username%22%3A%22devuser%22%7D&auth_date=${authDate}&hash=mock_dev_hash`;
 }
 
 /**
