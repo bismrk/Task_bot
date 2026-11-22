@@ -531,3 +531,79 @@ async def test_parse_tasks_default_model_used() -> None:
     assert call_kwargs["model"] == "gemini-3.5-flash"
     assert call_kwargs["config"].response_mime_type == "application/json"
     assert call_kwargs["config"].response_schema == TaskExtractionResult
+
+
+# ============================================================================
+# Default Target Date / Tomorrow Planning Prompt Tests (Issue #26)
+# ============================================================================
+
+
+def test_build_system_instruction_with_default_target_date() -> None:
+    """Verifies Issue #26: default_target_date instructs Gemini to default undated tasks and anchor times while keeping explicit date resolution."""
+    ref_time = datetime(2026, 11, 20, 22, 5, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+    tomorrow = date(2026, 11, 21)
+    instruction, tz = build_system_instruction(
+        user_timezone="Europe/Kyiv",
+        reference_time=ref_time,
+        default_target_date=tomorrow,
+    )
+    assert tz == ZoneInfo("Europe/Kyiv")
+    assert "Current Local Date: 2026-11-20" in instruction
+    assert "Default Target Date for Undated Tasks: 2026-11-21" in instruction
+    assert "2026-11-21" in instruction
+    assert "сьогодні" in instruction
+    assert "післязавтра" in instruction
+    assert "у п'ятницю" in instruction
+    assert "anchor it to 2026-11-21 in Europe/Kyiv" in instruction
+
+
+def test_build_system_instruction_without_default_target_date_is_backward_compatible() -> None:
+    """Verifies Issue #26: omitting default_target_date preserves existing prompt behavior."""
+    ref_time = datetime(2026, 11, 20, 22, 5, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+    instruction, _ = build_system_instruction(
+        user_timezone="Europe/Kyiv",
+        reference_time=ref_time,
+    )
+    assert "Default Target Date for Undated Tasks" not in instruction
+
+
+@pytest.mark.asyncio
+async def test_parse_tasks_from_text_and_audio_forward_default_target_date() -> None:
+    """Verifies Issue #26: parse_tasks_from_text and parse_tasks_from_audio forward default_target_date to Gemini config."""
+    mock_client = AsyncMock()
+    mock_client.models.generate_content.return_value = AsyncMock(
+        parsed=TaskExtractionResult(
+            tasks=[
+                ExtractedTask(
+                    title="Зателефонувати лікарю",
+                    target_date=date(2026, 11, 21),
+                )
+            ]
+        )
+    )
+    ref_time = datetime(2026, 11, 20, 22, 0, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+    tomorrow = date(2026, 11, 21)
+
+    text_tasks = await parse_tasks_from_text(
+        text="Зателефонувати лікарю о 10:00",
+        user_timezone="Europe/Kyiv",
+        reference_time=ref_time,
+        client=mock_client,
+        default_target_date=tomorrow,
+    )
+    assert len(text_tasks) == 1
+    assert text_tasks[0].target_date == tomorrow
+    text_sys_instr = mock_client.models.generate_content.call_args.kwargs["config"].system_instruction
+    assert "Default Target Date for Undated Tasks: 2026-11-21" in text_sys_instr
+
+    audio_tasks = await parse_tasks_from_audio(
+        audio_bytes=b"OggS_fake_tomorrow_audio",
+        user_timezone="Europe/Kyiv",
+        reference_time=ref_time,
+        client=mock_client,
+        default_target_date=tomorrow,
+    )
+    assert len(audio_tasks) == 1
+    assert audio_tasks[0].target_date == tomorrow
+    audio_sys_instr = mock_client.models.generate_content.call_args.kwargs["config"].system_instruction
+    assert "Default Target Date for Undated Tasks: 2026-11-21" in audio_sys_instr

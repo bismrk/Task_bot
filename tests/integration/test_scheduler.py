@@ -11,14 +11,16 @@ Verifies:
 from datetime import date, datetime, time, timedelta, timezone
 from unittest.mock import AsyncMock
 
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.bot.keyboards.tasks import PlanTomorrowCallback
 from src.models.task import Task, TaskPriority, TaskStatus
 from src.models.user import User
 from src.scheduler.jobs import (
+    process_user_evening_summary,
     process_user_midnight_rollover,
     process_user_morning_push,
     process_user_periodic_reminder,
@@ -1037,3 +1039,318 @@ async def test_deadline_alerts_still_fire_when_periodic_reminders_disabled(
     assert dl_stats["reminders_10m_sent"] == 1
     assert dl_stats["errors"] == 0
     assert mock_bot.send_message.call_count == 2
+
+
+# ============================================================================
+# Evening Analytics Summary Tests (Issue #26)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_evening_summary_partial_completion_tags_streak_and_keyboard(
+    db_session: AsyncSession,
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #26: 22:00 evening summary calculates completion %, 10-segment bar, streak, top 3 escaped tags, excludes canceled, attaches keyboard."""
+    today = date(2026, 11, 21)
+    yesterday = date(2026, 11, 20)
+    user = User(
+        telegram_id=8001,
+        timezone="Europe/Kyiv",
+        last_evening_summary_date=None,
+    )
+    db_session.add(user)
+
+    # Yesterday's completed task to create a 2-day streak
+    db_session.add(
+        Task(
+            user_id=8001,
+            title="Вчорашня задача",
+            target_date=yesterday,
+            status=TaskStatus.done,
+            tag="історія",
+        )
+    )
+    # Today's active tasks: 3 done + 1 todo = 4 total (75%, 8 filled segments)
+    # Tags: #робота (2), <dev> & ops (1), alpha (1), zeta (1) -> top 3: робота (2), <dev> & ops (1), alpha (1)
+    # Canceled task with tag must NOT be counted in total or tags
+    db_session.add_all(
+        [
+            Task(user_id=8001, title="T1", target_date=today, status=TaskStatus.done, tag="#робота"),
+            Task(user_id=8001, title="T2", target_date=today, status=TaskStatus.done, tag="робота"),
+            Task(user_id=8001, title="T3", target_date=today, status=TaskStatus.done, tag="<dev> & ops"),
+            Task(user_id=8001, title="T4", target_date=today, status=TaskStatus.todo, tag="alpha"),
+            Task(user_id=8001, title="T5", target_date=today, status=TaskStatus.canceled, tag="скасований"),
+        ]
+    )
+    await db_session.commit()
+
+    # 22:00 Kyiv on 2026-11-21 = 20:00 UTC
+    evening_utc = datetime(2026, 11, 21, 20, 0, 0, tzinfo=timezone.utc)
+    triggered = await process_user_evening_summary(
+        bot=mock_bot,
+        session=db_session,
+        user=user,
+        webapp_url="https://app.tasks.internal",
+        now_dt=evening_utc,
+    )
+
+    assert triggered is True
+    assert mock_bot.send_message.call_count == 1
+    call = mock_bot.send_message.call_args
+    assert call.kwargs["chat_id"] == 8001
+    assert call.kwargs["parse_mode"] == "HTML"
+
+    text = call.kwargs["text"]
+    assert "🌙 <b>Підсумки дня (21.11.2026)</b>" in text
+    assert "3/4" in text
+    assert "75%" in text
+    # 3/4 -> round(7.5) = 8 filled, 2 empty = 10 segments total
+    assert ("🟩" * 8 + "⬜" * 2) in text
+    assert "1" in text
+    assert "⏳" in text
+    assert "🔥 Стрік: 2 дн." in text
+    # Top 3 tags: робота (2), then alphabetically <dev> & ops (escaped) and alpha
+    assert "#робота (2)" in text
+    assert "#&lt;dev&gt; &amp; ops (1)" in text
+    assert "#alpha (1)" in text
+    assert "скасований" not in text
+    assert "завтра" in text.lower()
+
+    # Keyboard: max 2 buttons per row, [📝 План на завтра] + [🚀 Відкрити план]
+    kb = call.kwargs["reply_markup"]
+    assert kb is not None
+    assert len(kb.inline_keyboard) == 1
+    assert len(kb.inline_keyboard[0]) == 2
+    assert kb.inline_keyboard[0][0].text == "📝 План на завтра"
+    cb_unpacked = PlanTomorrowCallback.unpack(kb.inline_keyboard[0][0].callback_data)
+    assert cb_unpacked.action == "start"
+    assert cb_unpacked.user_id == 8001
+    assert kb.inline_keyboard[0][1].text == "🚀 Відкрити план"
+    assert kb.inline_keyboard[0][1].web_app.url == "https://app.tasks.internal"
+
+    assert user.last_evening_summary_date == today
+    assert user.last_periodic_reminder_at is not None
+    assert user.last_periodic_reminder_at.replace(tzinfo=timezone.utc) == evening_utc
+
+
+@pytest.mark.asyncio
+async def test_evening_summary_100_percent_and_no_tags_omits_tag_line(
+    db_session: AsyncSession,
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #26: 100% completion shows celebratory message, full green bar, omits tags when none present, uses open_plan fallback."""
+    today = date(2026, 11, 21)
+    user = User(telegram_id=8002, timezone="Europe/Kyiv")
+    db_session.add(user)
+    db_session.add_all(
+        [
+            Task(user_id=8002, title="Done 1", target_date=today, status=TaskStatus.done, tag=None),
+            Task(user_id=8002, title="Done 2", target_date=today, status=TaskStatus.done, tag=None),
+        ]
+    )
+    await db_session.commit()
+
+    evening_utc = datetime(2026, 11, 21, 20, 0, 0, tzinfo=timezone.utc)
+    triggered = await process_user_evening_summary(
+        bot=mock_bot,
+        session=db_session,
+        user=user,
+        webapp_url=None,
+        now_dt=evening_utc,
+    )
+
+    assert triggered is True
+    call = mock_bot.send_message.call_args
+    text = call.kwargs["text"]
+    assert "2/2" in text
+    assert "100%" in text
+    assert ("🟩" * 10) in text
+    assert "⬜" not in text
+    assert "🎉" in text
+    assert "🔥 Стрік: 1 дн." in text
+    assert "🏷️" not in text
+
+    kb = call.kwargs["reply_markup"]
+    assert kb.inline_keyboard[0][1].text == "🚀 Відкрити план"
+    assert kb.inline_keyboard[0][1].callback_data == "open_plan"
+
+
+@pytest.mark.asyncio
+async def test_evening_summary_empty_day_and_only_canceled_tasks(
+    db_session: AsyncSession,
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #26: empty day or canceled-only day avoids division by zero, shows friendly notice, keeps streak if > 0."""
+    today = date(2026, 11, 21)
+    yesterday = date(2026, 11, 20)
+
+    # User A: only canceled task today, 1-day streak from yesterday
+    u_a = User(telegram_id=8003, timezone="Europe/Kyiv")
+    # User B: zero tasks at all, 0 streak
+    u_b = User(telegram_id=8004, timezone="Europe/Kyiv")
+    db_session.add_all([u_a, u_b])
+    db_session.add_all(
+        [
+            Task(user_id=8003, title="Yesterday done", target_date=yesterday, status=TaskStatus.done),
+            Task(user_id=8003, title="Canceled today", target_date=today, status=TaskStatus.canceled, tag="робота"),
+        ]
+    )
+    await db_session.commit()
+
+    evening_utc = datetime(2026, 11, 21, 20, 0, 0, tzinfo=timezone.utc)
+
+    assert await process_user_evening_summary(mock_bot, db_session, u_a, now_dt=evening_utc) is True
+    text_a = mock_bot.send_message.call_args_list[0].kwargs["text"]
+    assert "🌙 <b>Підсумки дня (21.11.2026)</b>" in text_a
+    assert "Сьогодні не було запланованих завдань." in text_a
+    assert "🔥 Стрік: 1 дн." in text_a
+    assert "завтра" in text_a.lower()
+
+    assert await process_user_evening_summary(mock_bot, db_session, u_b, now_dt=evening_utc) is True
+    text_b = mock_bot.send_message.call_args_list[1].kwargs["text"]
+    assert "Сьогодні не було запланованих завдань." in text_b
+    assert "🔥 Стрік:" not in text_b
+    assert "завтра" in text_b.lower()
+
+
+@pytest.mark.asyncio
+async def test_evening_summary_off_window_and_idempotency(
+    db_session: AsyncSession,
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #26: off-window times return False; repeated 22:00 calls on same day are idempotent."""
+    user = User(telegram_id=8005, timezone="Europe/Kyiv")
+    db_session.add(user)
+    await db_session.commit()
+
+    # 21:59, 22:01, 21:00, 23:00 Kyiv (Kyiv = UTC+2)
+    for dt in (
+        datetime(2026, 11, 21, 19, 59, 0, tzinfo=timezone.utc),
+        datetime(2026, 11, 21, 20, 1, 0, tzinfo=timezone.utc),
+        datetime(2026, 11, 21, 19, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 11, 21, 21, 0, 0, tzinfo=timezone.utc),
+    ):
+        assert await process_user_evening_summary(mock_bot, db_session, user, now_dt=dt) is False
+        assert user.last_evening_summary_date is None
+
+    assert mock_bot.send_message.call_count == 0
+
+    # 22:00 Kyiv -> triggers once
+    evening_utc = datetime(2026, 11, 21, 20, 0, 0, tzinfo=timezone.utc)
+    assert await process_user_evening_summary(mock_bot, db_session, user, now_dt=evening_utc) is True
+    assert mock_bot.send_message.call_count == 1
+    assert user.last_evening_summary_date == date(2026, 11, 21)
+
+    # Second run at same 22:00 -> idempotent, returns False
+    assert await process_user_evening_summary(mock_bot, db_session, user, now_dt=evening_utc) is False
+    assert mock_bot.send_message.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_evening_summary_independent_of_periodic_and_suppresses_2200_periodic(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #26: 22:00 evening summary fires when reminder_interval_hours=None and suppresses periodic reminder at 22:00."""
+    today = date(2026, 11, 21)
+    u_disabled_periodic = User(
+        telegram_id=8006,
+        timezone="Europe/Kyiv",
+        reminder_interval_hours=None,
+    )
+    u_active_periodic = User(
+        telegram_id=8007,
+        timezone="Europe/Kyiv",
+        reminder_interval_hours=1,  # Would otherwise fire every hour!
+    )
+    db_session.add_all([u_disabled_periodic, u_active_periodic])
+    db_session.add(
+        Task(
+            user_id=8007,
+            title="Незавершена задача",
+            target_date=today,
+            status=TaskStatus.todo,
+        )
+    )
+    await db_session.commit()
+
+    # 22:00 Kyiv = 20:00 UTC
+    evening_utc = datetime(2026, 11, 21, 20, 0, 0, tzinfo=timezone.utc)
+
+    # Direct check: periodic reminder MUST skip 22:00
+    assert (
+        await process_user_periodic_reminder(
+            mock_bot, db_session, u_active_periodic, now_dt=evening_utc
+        )
+        is False
+    )
+
+    stats = await run_timezone_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        reference_time=evening_utc,
+    )
+    assert stats["evening_triggered"] == 2
+    assert stats["periodic_triggered"] == 0
+    assert stats["morning_triggered"] == 0
+    assert stats["midnight_triggered"] == 0
+    assert stats["errors"] == 0
+    assert mock_bot.send_message.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_timezone_checks_evening_blocked_deactivated_and_error_isolation(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #26: run_timezone_checks handles blocked/deactivated errors at 22:00 cleanly and isolates unexpected errors."""
+    u_forbidden = User(telegram_id=8101, timezone="Europe/Kyiv")
+    u_deactivated = User(telegram_id=8102, timezone="Europe/Kyiv")
+    u_ok = User(telegram_id=8103, timezone="Europe/Kyiv")
+    u_fail = User(telegram_id=8104, timezone="Europe/Kyiv")
+    db_session.add_all([u_forbidden, u_deactivated, u_ok, u_fail])
+    await db_session.commit()
+
+    async def fake_send(chat_id, **kwargs):
+        if chat_id == 8101:
+            raise TelegramForbiddenError(
+                method="sendMessage",
+                message="Forbidden: bot was blocked by the user",
+            )
+        if chat_id == 8102:
+            raise TelegramAPIError(
+                method="sendMessage",
+                message="Forbidden: user is deactivated",
+            )
+        if chat_id == 8104:
+            raise RuntimeError("Transient network outage")
+        return AsyncMock(message_id=300)
+
+    mock_bot.send_message.side_effect = fake_send
+
+    evening_utc = datetime(2026, 11, 21, 20, 0, 0, tzinfo=timezone.utc)
+    stats = await run_timezone_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        reference_time=evening_utc,
+    )
+
+    assert stats["evening_triggered"] == 1
+    assert stats["periodic_triggered"] == 0
+    assert stats["errors"] == 1  # Only u_fail counts as error
+
+    async with session_factory() as s:
+        ref_forbidden = await s.get(User, 8101)
+        ref_deactivated = await s.get(User, 8102)
+        ref_ok = await s.get(User, 8103)
+        ref_fail = await s.get(User, 8104)
+
+        assert ref_forbidden.last_evening_summary_date == date(2026, 11, 21)
+        assert ref_forbidden.last_periodic_reminder_at is not None
+        assert ref_deactivated.last_evening_summary_date == date(2026, 11, 21)
+        assert ref_deactivated.last_periodic_reminder_at is not None
+        assert ref_ok.last_evening_summary_date == date(2026, 11, 21)
+        assert ref_fail.last_evening_summary_date is None

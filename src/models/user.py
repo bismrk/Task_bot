@@ -48,6 +48,11 @@ class User(Base):
         nullable=True,
         default=None,
     )
+    last_evening_summary_date: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True,
+        default=None,
+    )
     reminder_interval_hours: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,

@@ -7,3 +7,4 @@ class TaskIngestionState(StatesGroup):
     """FSM states for ingesting voice or text tasks."""
 
     waiting_confirmation = State()
+    planning_tomorrow = State()

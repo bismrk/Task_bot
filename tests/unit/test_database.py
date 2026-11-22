@@ -359,3 +359,106 @@ async def test_init_db_migrates_legacy_users_table_idempotently(tmp_path) -> Non
         ]
 
     await legacy_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_user_last_evening_summary_date_default_and_persistence(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #26: User.last_evening_summary_date defaults to None and persists dates."""
+    user = User(telegram_id=700010)
+    assert user.last_evening_summary_date is None
+
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+    assert user.last_evening_summary_date is None
+
+    user.last_evening_summary_date = date(2026, 11, 21)
+    await db_session.commit()
+    await db_session.refresh(user)
+    assert user.last_evening_summary_date == date(2026, 11, 21)
+
+
+@pytest.mark.asyncio
+async def test_init_db_migrates_last_evening_summary_date_idempotently(tmp_path) -> None:
+    """Verifies Issue #26: init_db safely adds last_evening_summary_date, preserves records, and is idempotent."""
+    db_file = tmp_path / "legacy_evening.db"
+    legacy_engine = create_db_engine(f"sqlite+aiosqlite:///{db_file}")
+
+    async with legacy_engine.begin() as conn:
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE users (
+                    telegram_id BIGINT PRIMARY KEY NOT NULL,
+                    timezone VARCHAR NOT NULL DEFAULT 'Europe/Kyiv',
+                    created_at DATETIME NOT NULL,
+                    last_midnight_review_date DATE,
+                    last_morning_push_date DATE,
+                    reminder_interval_hours INTEGER DEFAULT 4,
+                    last_periodic_reminder_at DATETIME
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                INSERT INTO users (telegram_id, timezone, created_at, reminder_interval_hours)
+                VALUES
+                    (810001, 'Europe/Kyiv', '2026-11-01 08:00:00', 4),
+                    (810002, 'Asia/Tokyo', '2026-11-02 09:00:00', NULL)
+                """
+            )
+        )
+
+    await init_db(engine=legacy_engine)
+
+    async with legacy_engine.connect() as conn:
+        cols = {
+            row[1]
+            for row in (await conn.execute(text("PRAGMA table_info(users)"))).fetchall()
+        }
+        assert "last_evening_summary_date" in cols
+
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT telegram_id, timezone, reminder_interval_hours, last_evening_summary_date "
+                    "FROM users ORDER BY telegram_id"
+                )
+            )
+        ).fetchall()
+        assert rows == [
+            (810001, "Europe/Kyiv", 4, None),
+            (810002, "Asia/Tokyo", None, None),
+        ]
+
+    async with legacy_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE users SET last_evening_summary_date = '2026-11-21' "
+                "WHERE telegram_id = 810001"
+            )
+        )
+
+    # Re-running init_db must be idempotent and preserve existing rows & values
+    await init_db(engine=legacy_engine)
+    await init_db(engine=legacy_engine)
+
+    async with legacy_engine.connect() as conn:
+        rows_after = (
+            await conn.execute(
+                text(
+                    "SELECT telegram_id, last_evening_summary_date "
+                    "FROM users ORDER BY telegram_id"
+                )
+            )
+        ).fetchall()
+        assert rows_after == [
+            (810001, "2026-11-21"),
+            (810002, None),
+        ]
+
+    await legacy_engine.dispose()

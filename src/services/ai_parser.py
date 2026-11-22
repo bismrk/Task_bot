@@ -1,6 +1,6 @@
 """Gemini AI task parser service for text and audio inputs."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import inspect
 import logging
 from typing import Any
@@ -30,6 +30,7 @@ def _get_user_timezone(user_timezone: str) -> ZoneInfo:
 def build_system_instruction(
     user_timezone: str = "Europe/Kyiv",
     reference_time: datetime | None = None,
+    default_target_date: date | None = None,
 ) -> tuple[str, ZoneInfo]:
     """Build system instructions incorporating the user's reference date, time, and timezone."""
     try:
@@ -50,19 +51,42 @@ def build_system_instruction(
     time_str = now.strftime("%H:%M:%S")
     day_name = now.strftime("%A")
 
+    if default_target_date is not None:
+        default_date_str = default_target_date.strftime("%Y-%m-%d")
+        default_date_context = f"- Default Target Date for Undated Tasks: {default_date_str}\n"
+        target_date_rule = (
+            f"   - 'target_date': The planned calendar date (YYYY-MM-DD). "
+            f"If a task does NOT specify an explicit date or relative date expression, default 'target_date' to {default_date_str}. "
+            f"When the user explicitly mentions a date or relative expression such as 'сьогодні' (today, {date_str}), 'завтра' (tomorrow), 'післязавтра', or days of the week (e.g. 'у п'ятницю', 'в понеділок'), honor it strictly relative to the Current Local Date ({date_str}).\n"
+        )
+        deadline_rule = (
+            f"   - 'deadline_at': If a specific time is mentioned (e.g. 'о 15:00', 'до 18:30', '15:00'), format as an ISO-8601 string with UTC 'Z' or local timezone offset for {user_timezone}. "
+            f"If a time is mentioned without an explicit date, anchor it to {default_date_str} in {user_timezone}. "
+            "If no specific time of day is mentioned, set to null.\n"
+        )
+    else:
+        default_date_context = ""
+        target_date_rule = (
+            f"   - 'target_date': The planned calendar date (YYYY-MM-DD). Resolve relative expressions such as 'сьогодні' (today, {date_str}), 'завтра' (tomorrow), 'післязавтра', days of the week (e.g. 'у п'ятницю', 'в понеділок') strictly relative to the Current Local Date.\n"
+        )
+        deadline_rule = (
+            f"   - 'deadline_at': If a specific time is mentioned (e.g. 'о 15:00', 'до 18:30', '15:00'), format as an ISO-8601 string with UTC 'Z' or local timezone offset for {user_timezone}. If no specific time of day is mentioned, set to null.\n"
+        )
+
     instruction = (
         "You are an AI assistant specialized in extracting structured actionable tasks from user voice notes and text messages.\n\n"
         "User Temporal Context:\n"
         f"- Current Local Date: {date_str}\n"
         f"- Current Local Time: {time_str}\n"
         f"- Current Day of Week: {day_name}\n"
-        f"- User Timezone: {user_timezone}\n\n"
+        f"- User Timezone: {user_timezone}\n"
+        f"{default_date_context}\n"
         "Extraction Rules:\n"
         "1. Extract all actionable tasks mentioned by the user.\n"
         "2. For each task:\n"
         "   - 'title': Concise summary of the task (up to 255 characters, stripped of leading/trailing whitespace).\n"
-        f"   - 'target_date': The planned calendar date (YYYY-MM-DD). Resolve relative expressions such as 'сьогодні' (today, {date_str}), 'завтра' (tomorrow), 'післязавтра', days of the week (e.g. 'у п'ятницю', 'в понеділок') strictly relative to the Current Local Date.\n"
-        f"   - 'deadline_at': If a specific time is mentioned (e.g. 'о 15:00', 'до 18:30', '15:00'), format as an ISO-8601 string with UTC 'Z' or local timezone offset for {user_timezone}. If no specific time of day is mentioned, set to null.\n"
+        f"{target_date_rule}"
+        f"{deadline_rule}"
         "   - 'priority': Task urgency/importance ('low', 'medium', 'high'). If the user indicates urgency or importance ('терміново', 'важливо', 'високий пріоритет', 'urgent', 'asap'), set to 'high'. If low priority ('низький', 'не терміново', 'low'), set to 'low'. Default to 'medium'.\n"
         "   - 'tag': Optional single category or context tag (e.g. 'робота', 'дім', 'навчання', 'покупки'). Strip any leading '#' and trim to at most 50 characters. If no category or topic is evident, set to null.\n"
         "3. If the input contains chit-chat, conversational filler, background noise, or no actionable tasks, return an empty tasks list []."
@@ -125,6 +149,7 @@ async def parse_tasks(
     user_timezone: str = "Europe/Kyiv",
     reference_time: datetime | None = None,
     client: genai.Client | None = None,
+    default_target_date: date | None = None,
 ) -> list[ExtractedTask]:
     """Parse tasks from text or audio bytes using Gemini 2.5 Flash structured outputs."""
     # REQ-AI-01 & REQ-AI-02: Check empty or whitespace-only inputs
@@ -157,6 +182,7 @@ async def parse_tasks(
     system_instruction, tz = build_system_instruction(
         user_timezone=user_timezone,
         reference_time=reference_time,
+        default_target_date=default_target_date,
     )
 
     config = types.GenerateContentConfig(
@@ -252,6 +278,7 @@ async def parse_tasks_from_text(
     user_timezone: str = "Europe/Kyiv",
     reference_time: datetime | None = None,
     client: genai.Client | None = None,
+    default_target_date: date | None = None,
 ) -> list[ExtractedTask]:
     """Extract tasks from a plain text message using Gemini AI."""
     return await parse_tasks(
@@ -260,6 +287,7 @@ async def parse_tasks_from_text(
         user_timezone=user_timezone,
         reference_time=reference_time,
         client=client,
+        default_target_date=default_target_date,
     )
 
 
@@ -269,6 +297,7 @@ async def parse_tasks_from_audio(
     user_timezone: str = "Europe/Kyiv",
     reference_time: datetime | None = None,
     client: genai.Client | None = None,
+    default_target_date: date | None = None,
 ) -> list[ExtractedTask]:
     """Extract tasks from raw audio bytes (e.g. Telegram .ogg Opus) using Gemini AI."""
     return await parse_tasks(
@@ -277,4 +306,5 @@ async def parse_tasks_from_audio(
         user_timezone=user_timezone,
         reference_time=reference_time,
         client=client,
+        default_target_date=default_target_date,
     )

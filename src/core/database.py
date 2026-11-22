@@ -91,3 +91,9 @@ async def init_db(engine: AsyncEngine | None = None) -> None:
                     "ALTER TABLE users ADD COLUMN last_periodic_reminder_at DATETIME"
                 )
             )
+        if "last_evening_summary_date" not in existing_columns:
+            await conn.execute(
+                text(
+                    "ALTER TABLE users ADD COLUMN last_evening_summary_date DATE"
+                )
+            )

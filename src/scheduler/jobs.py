@@ -13,10 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.bot.handlers.rollover import send_midnight_rollover_dialogue
 from src.bot.keyboards.deadline import get_deadline_keyboard
 from src.bot.keyboards.start import get_start_keyboard
+from src.bot.keyboards.tasks import get_evening_summary_keyboard
 from src.models.task import Task, TaskPriority, TaskStatus
 from src.models.user import User
 from src.services.task_service import (
     ensure_recurring_tasks_for_date,
+    get_productivity_analytics,
     get_tasks_for_date,
 )
 from src.services.user_service import get_user_local_time
@@ -235,12 +237,12 @@ async def process_user_periodic_reminder(
     now_utc = _normalize_utc(now_dt)
     local_time = get_user_local_time(user, now_utc)
 
-    # Only evaluate at the top of the local hour within 08:00-22:59, skipping 09:00
+    # Only evaluate at the top of the local hour within 08:00-22:59, skipping 09:00 and 22:00
     if local_time.minute != 0:
         return False
     if not (8 <= local_time.hour <= 22):
         return False
-    if local_time.hour == 9:
+    if local_time.hour in (9, 22):
         return False
 
     # Exact deterministic trigger & idempotency rule
@@ -318,6 +320,132 @@ async def process_user_periodic_reminder(
     return True
 
 
+async def process_user_evening_summary(
+    bot: Bot,
+    session: AsyncSession,
+    user: User,
+    webapp_url: str | None = None,
+    now_dt: datetime | None = None,
+) -> bool:
+    """Process 22:00 end-of-day productivity analytics summary for a single user.
+
+    Triggers only when the user's local time is 22:00 (independent of reminder_interval_hours),
+    enforces per-day idempotency via user.last_evening_summary_date, computes daily completion
+    metrics, 10-segment progress bar, current streak, and top tags, and sends an HTML message
+    with [📝 План на завтра] and [🚀 Відкрити план] inline buttons.
+
+    Args:
+        bot: aiogram Bot instance.
+        session: Active SQLAlchemy async session.
+        user: User record.
+        webapp_url: Optional base URL for Telegram Mini App.
+        now_dt: Optional reference datetime for simulation/testing.
+
+    Returns:
+        True if the evening summary was sent, False otherwise.
+    """
+    now_utc = _normalize_utc(now_dt)
+    local_time = get_user_local_time(user, now_utc)
+
+    # Check if local time is in 22:00 window
+    if not (local_time.hour == 22 and local_time.minute == 0):
+        return False
+
+    today = local_time.date()
+
+    # Idempotency check per local calendar day
+    if user.last_evening_summary_date == today:
+        return False
+
+    # 1. Query today's tasks and count only non-canceled tasks (done + todo)
+    tasks = await get_tasks_for_date(
+        session=session,
+        user_id=user.telegram_id,
+        target_date=today,
+    )
+    active_tasks = [t for t in tasks if t.status in (TaskStatus.done, TaskStatus.todo)]
+    total_today = len(active_tasks)
+    done_today = sum(1 for t in active_tasks if t.status == TaskStatus.done)
+    remaining_today = sum(1 for t in active_tasks if t.status == TaskStatus.todo)
+
+    # 2. Compute current streak via productivity analytics
+    analytics = await get_productivity_analytics(
+        session=session,
+        user_id=user.telegram_id,
+        days=14,
+        reference_date=today,
+    )
+    streak_current = analytics.streak_current
+
+    # 3. Format HTML message adhering to _docs/design-system.md
+    formatted_date = today.strftime("%d.%m.%Y")
+    if total_today > 0:
+        completion_pct = round((done_today / total_today) * 100)
+        filled_segments = max(0, min(10, round((done_today / total_today) * 10)))
+        progress_bar = "🟩" * filled_segments + "⬜" * (10 - filled_segments)
+
+        lines = [
+            f"🌙 <b>Підсумки дня ({formatted_date})</b>\n",
+            f"✅ Виконано: <b>{done_today}/{total_today}</b> ({completion_pct}%)",
+            progress_bar,
+        ]
+        if remaining_today > 0:
+            lines.append(f"⏳ Залишилось невиконаних: <b>{remaining_today}</b>")
+        else:
+            lines.append("🎉 <b>Чудова робота! Усі завдання на сьогодні виконано!</b>")
+
+        lines.append(f"🔥 Стрік: {streak_current} дн.")
+
+        # Top 3 tags from today's non-canceled tagged tasks
+        tag_counts: dict[str, int] = {}
+        for task in active_tasks:
+            if task.tag:
+                cleaned_tag = task.tag.strip().lstrip("#").strip()
+                if cleaned_tag:
+                    tag_counts[cleaned_tag] = tag_counts.get(cleaned_tag, 0) + 1
+        top_tags = sorted(tag_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+        if top_tags:
+            tags_str = ", ".join(
+                f"#{html.escape(tag)} ({count})" for tag, count in top_tags
+            )
+            lines.append(f"🏷️ Теги дня: {tags_str}")
+
+        lines.append(
+            "\n📝 <b>Сплануймо завтра?</b> Натисніть «План на завтра» нижче "
+            "або надішліть голосове чи текстове повідомлення, щоб спланувати завтра."
+        )
+        text = "\n".join(lines)
+    else:
+        lines = [
+            f"🌙 <b>Підсумки дня ({formatted_date})</b>\n",
+            "Сьогодні не було запланованих завдань.",
+        ]
+        if streak_current > 0:
+            lines.append(f"🔥 Стрік: {streak_current} дн.")
+        lines.append(
+            "\n📝 <b>Сплануймо завтра?</b> Натисніть «План на завтра» нижче "
+            "або надішліть голосове чи текстове повідомлення, щоб спланувати завтра."
+        )
+        text = "\n".join(lines)
+
+    keyboard = get_evening_summary_keyboard(
+        user_id=user.telegram_id,
+        webapp_url=webapp_url,
+    )
+
+    await bot.send_message(
+        chat_id=user.telegram_id,
+        text=text,
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
+
+    user.last_evening_summary_date = today
+    user.last_periodic_reminder_at = now_utc
+    await session.commit()
+    return True
+
+
 async def run_timezone_checks(
     bot: Bot,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -343,6 +471,7 @@ async def run_timezone_checks(
             "midnight_triggered": int,
             "morning_triggered": int,
             "periodic_triggered": int,
+            "evening_triggered": int,
             "errors": int,
         }
     """
@@ -350,6 +479,7 @@ async def run_timezone_checks(
         "midnight_triggered": 0,
         "morning_triggered": 0,
         "periodic_triggered": 0,
+        "evening_triggered": 0,
         "errors": 0,
     }
 
@@ -394,6 +524,16 @@ async def run_timezone_checks(
                 if periodic_triggered:
                     stats["periodic_triggered"] += 1
 
+                evening_triggered = await process_user_evening_summary(
+                    bot=bot,
+                    session=session,
+                    user=user,
+                    webapp_url=webapp_url,
+                    now_dt=reference_time,
+                )
+                if evening_triggered:
+                    stats["evening_triggered"] += 1
+
             except TelegramForbiddenError as e:
                 logger.warning("User %s has blocked the bot: %s", user.telegram_id, e)
                 try:
@@ -403,6 +543,9 @@ async def run_timezone_checks(
                         user.last_midnight_review_date = local_time.date()
                     elif local_time.hour == 9 and local_time.minute == 0:
                         user.last_morning_push_date = local_time.date()
+                        user.last_periodic_reminder_at = now_utc
+                    elif local_time.hour == 22 and local_time.minute == 0:
+                        user.last_evening_summary_date = local_time.date()
                         user.last_periodic_reminder_at = now_utc
                     elif 8 <= local_time.hour <= 22 and local_time.minute == 0:
                         user.last_periodic_reminder_at = now_utc
@@ -425,6 +568,9 @@ async def run_timezone_checks(
                             user.last_midnight_review_date = local_time.date()
                         elif local_time.hour == 9 and local_time.minute == 0:
                             user.last_morning_push_date = local_time.date()
+                            user.last_periodic_reminder_at = now_utc
+                        elif local_time.hour == 22 and local_time.minute == 0:
+                            user.last_evening_summary_date = local_time.date()
                             user.last_periodic_reminder_at = now_utc
                         elif 8 <= local_time.hour <= 22 and local_time.minute == 0:
                             user.last_periodic_reminder_at = now_utc

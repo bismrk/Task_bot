@@ -1,13 +1,13 @@
 """Integration tests for voice and text task ingestion bot handlers and confirmation callbacks."""
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiogram import Bot
 from aiogram.enums import ChatAction
-from aiogram.methods import EditMessageText
+from aiogram.methods import EditMessageText, SendMessage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -24,18 +24,30 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.dispatcher import create_dispatcher
-from src.bot.handlers.callbacks import task_confirm_callback
+from src.bot.handlers.callbacks import plan_tomorrow_callback, task_confirm_callback
 from src.bot.handlers.voice_text import (
     EMPTY_TASKS_NOTIFICATION,
     format_extracted_tasks_message,
     handle_text_message,
     handle_voice_message,
 )
-from src.bot.keyboards.tasks import TaskConfirmCallback, get_task_confirmation_keyboard
+from src.bot.keyboards import (
+    PlanTomorrowCallback as ExportedPlanTomorrowCallback,
+    get_evening_summary_keyboard as exported_get_evening_summary_keyboard,
+    get_plan_tomorrow_cancel_keyboard as exported_get_plan_tomorrow_cancel_keyboard,
+)
+from src.bot.keyboards.tasks import (
+    PlanTomorrowCallback,
+    TaskConfirmCallback,
+    get_evening_summary_keyboard,
+    get_plan_tomorrow_cancel_keyboard,
+    get_task_confirmation_keyboard,
+)
 from src.bot.states.tasks import TaskIngestionState
 from src.models.task import Task, TaskPriority, TaskStatus
 from src.models.user import User
 from src.schemas.task import ExtractedTask
+from src.services.user_service import get_user_local_time
 
 
 def create_fsm_context(user_id: int, chat_id: int, bot_id: int = 1) -> tuple[FSMContext, MemoryStorage]:
@@ -1235,3 +1247,421 @@ async def test_dispatcher_feed_text_message_to_delete_callback_pipeline(db_sessi
         # Check FSM cleared
         cleared_state = await dp.storage.get_state(key=key)
         assert cleared_state is None
+
+
+# ==============================================================================
+# Tomorrow Planning Mode Tests (Issue #26)
+# ==============================================================================
+
+
+def test_evening_summary_and_plan_tomorrow_keyboards_and_exports() -> None:
+    """Verifies Issue #26: PlanTomorrowCallback, evening summary & cancel keyboards, and __init__ exports."""
+    assert ExportedPlanTomorrowCallback is PlanTomorrowCallback
+    assert exported_get_evening_summary_keyboard is get_evening_summary_keyboard
+    assert exported_get_plan_tomorrow_cancel_keyboard is get_plan_tomorrow_cancel_keyboard
+
+    kb_webapp = get_evening_summary_keyboard(user_id=9001, webapp_url="https://tma.example.com")
+    assert len(kb_webapp.inline_keyboard) == 1
+    assert len(kb_webapp.inline_keyboard[0]) == 2
+    assert kb_webapp.inline_keyboard[0][0].text == "📝 План на завтра"
+    start_cb = PlanTomorrowCallback.unpack(kb_webapp.inline_keyboard[0][0].callback_data)
+    assert start_cb.action == "start"
+    assert start_cb.user_id == 9001
+    assert kb_webapp.inline_keyboard[0][1].text == "🚀 Відкрити план"
+    assert kb_webapp.inline_keyboard[0][1].web_app.url == "https://tma.example.com"
+
+    kb_fallback = get_evening_summary_keyboard(user_id=9001, webapp_url=None)
+    assert kb_fallback.inline_keyboard[0][1].callback_data == "open_plan"
+
+    kb_cancel = get_plan_tomorrow_cancel_keyboard(user_id=9001)
+    assert len(kb_cancel.inline_keyboard) == 1
+    assert len(kb_cancel.inline_keyboard[0]) == 1
+    assert kb_cancel.inline_keyboard[0][0].text == "❌ Скасувати"
+    cancel_cb = PlanTomorrowCallback.unpack(kb_cancel.inline_keyboard[0][0].callback_data)
+    assert cancel_cb.action == "cancel"
+    assert cancel_cb.user_id == 9001
+
+
+@pytest.mark.asyncio
+async def test_plan_tomorrow_start_cancel_and_tenant_isolation(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #26: start sets planning_tomorrow preserving analytics msg, cancel clears FSM, tenant mismatches rejected."""
+    owner_id = 91001
+    attacker_id = 99991
+    db_user = User(telegram_id=owner_id, timezone="Europe/Kyiv")
+    db_session.add(db_user)
+    await db_session.commit()
+
+    state, _ = create_fsm_context(user_id=owner_id, chat_id=owner_id)
+    summary_msg = AsyncMock(spec=Message)
+    summary_msg.answer = AsyncMock()
+    summary_msg.edit_text = AsyncMock()
+
+    # 1. Tenant mismatch on start is rejected with alert and leaves state untouched
+    attacker_cb = AsyncMock(spec=CallbackQuery)
+    attacker_cb.from_user = TgUser(id=attacker_id, is_bot=False, first_name="Attacker")
+    attacker_cb.message = summary_msg
+    attacker_cb.answer = AsyncMock()
+    await plan_tomorrow_callback(
+        callback_query=attacker_cb,
+        callback_data=PlanTomorrowCallback(action="start", user_id=owner_id),
+        session=db_session,
+        state=state,
+    )
+    attacker_cb.answer.assert_called_once()
+    assert attacker_cb.answer.call_args.kwargs.get("show_alert") is True
+    assert await state.get_state() is None
+    summary_msg.answer.assert_not_called()
+
+    # 2. Owner taps [📝 План на завтра]
+    owner_cb = AsyncMock(spec=CallbackQuery)
+    owner_cb.from_user = TgUser(id=owner_id, is_bot=False, first_name="Owner")
+    owner_cb.message = summary_msg
+    owner_cb.answer = AsyncMock()
+    await plan_tomorrow_callback(
+        callback_query=owner_cb,
+        callback_data=PlanTomorrowCallback(action="start", user_id=owner_id),
+        session=db_session,
+        state=state,
+    )
+
+    assert await state.get_state() == TaskIngestionState.planning_tomorrow.state
+    owner_cb.answer.assert_called_once_with()
+    # Original analytics summary message must NOT be edited
+    summary_msg.edit_text.assert_not_called()
+    summary_msg.answer.assert_called_once()
+    expected_tomorrow = (get_user_local_time(db_user).date() + timedelta(days=1)).strftime("%d.%m.%Y")
+    prompt_text = summary_msg.answer.call_args.kwargs["text"]
+    assert f"🎙️ <b>Планування на завтра ({expected_tomorrow})</b>" in prompt_text
+    prompt_kb = summary_msg.answer.call_args.kwargs["reply_markup"]
+    assert prompt_kb.inline_keyboard[0][0].text == "❌ Скасувати"
+
+    # 3. Tenant mismatch on cancel is rejected with alert and preserves planning_tomorrow state
+    attacker_cancel_cb = AsyncMock(spec=CallbackQuery)
+    attacker_cancel_cb.from_user = TgUser(id=attacker_id, is_bot=False, first_name="Attacker")
+    attacker_cancel_cb.message = summary_msg
+    attacker_cancel_cb.answer = AsyncMock()
+    await plan_tomorrow_callback(
+        callback_query=attacker_cancel_cb,
+        callback_data=PlanTomorrowCallback(action="cancel", user_id=owner_id),
+        session=db_session,
+        state=state,
+    )
+    assert attacker_cancel_cb.answer.call_args.kwargs.get("show_alert") is True
+    assert await state.get_state() == TaskIngestionState.planning_tomorrow.state
+
+    # 4. Owner taps [❌ Скасувати]
+    prompt_msg = AsyncMock(spec=Message)
+    prompt_msg.edit_text = AsyncMock()
+    owner_cancel_cb = AsyncMock(spec=CallbackQuery)
+    owner_cancel_cb.from_user = TgUser(id=owner_id, is_bot=False, first_name="Owner")
+    owner_cancel_cb.message = prompt_msg
+    owner_cancel_cb.answer = AsyncMock()
+    await plan_tomorrow_callback(
+        callback_query=owner_cancel_cb,
+        callback_data=PlanTomorrowCallback(action="cancel", user_id=owner_id),
+        session=db_session,
+        state=state,
+    )
+    assert await state.get_state() is None
+    prompt_msg.edit_text.assert_called_once()
+    assert prompt_msg.edit_text.call_args.kwargs["reply_markup"] is None
+    owner_cancel_cb.answer.assert_called_once_with("Скасовано!")
+
+
+@pytest.mark.asyncio
+async def test_voice_and_text_in_planning_tomorrow_mode_pass_tomorrow_date(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #26: voice & text handlers pass default_target_date=tomorrow when in planning_tomorrow."""
+    user_id = 91002
+    db_user = User(telegram_id=user_id, timezone="America/New_York")
+    db_session.add(db_user)
+    await db_session.commit()
+
+    expected_tomorrow = get_user_local_time(db_user).date() + timedelta(days=1)
+    extracted = [
+        ExtractedTask(
+            title="Підготувати звіт",
+            target_date=expected_tomorrow,
+            priority=TaskPriority.high,
+        )
+    ]
+
+    # Voice in planning_tomorrow mode
+    voice_state, _ = create_fsm_context(user_id=user_id, chat_id=user_id)
+    await voice_state.set_state(TaskIngestionState.planning_tomorrow)
+    bot_voice = AsyncMock(spec=Bot)
+    bot_voice.send_chat_action = AsyncMock()
+
+    async def fake_download(file_id: str, destination: io.BytesIO) -> None:
+        destination.write(b"tomorrow_voice_bytes")
+
+    bot_voice.download = AsyncMock(side_effect=fake_download)
+    voice_msg = AsyncMock(spec=Message)
+    voice_msg.from_user = TgUser(id=user_id, is_bot=False, first_name="VoiceTomorrow")
+    voice_msg.chat = Chat(id=user_id, type="private")
+    voice_msg.voice = Voice(file_id="vf_tmr", file_unique_id="vu_tmr", duration=4)
+    voice_msg.answer = AsyncMock()
+
+    with patch(
+        "src.bot.handlers.voice_text.parse_tasks_from_audio",
+        new_callable=AsyncMock,
+        return_value=extracted,
+    ) as mock_audio_parse:
+        await handle_voice_message(voice_msg, bot_voice, db_session, voice_state)
+        mock_audio_parse.assert_called_once_with(
+            audio_bytes=b"tomorrow_voice_bytes",
+            user_timezone="America/New_York",
+            default_target_date=expected_tomorrow,
+        )
+    assert await voice_state.get_state() == TaskIngestionState.waiting_confirmation.state
+    assert (await voice_state.get_data())["from_tomorrow_plan"] is True
+
+    # Text in planning_tomorrow mode
+    text_state, _ = create_fsm_context(user_id=user_id, chat_id=user_id)
+    await text_state.set_state(TaskIngestionState.planning_tomorrow)
+    bot_text = AsyncMock(spec=Bot)
+    bot_text.send_chat_action = AsyncMock()
+    text_msg = AsyncMock(spec=Message)
+    text_msg.from_user = TgUser(id=user_id, is_bot=False, first_name="TextTomorrow")
+    text_msg.chat = Chat(id=user_id, type="private")
+    text_msg.text = "Підготувати звіт"
+    text_msg.answer = AsyncMock()
+
+    with patch(
+        "src.bot.handlers.voice_text.parse_tasks_from_text",
+        new_callable=AsyncMock,
+        return_value=extracted,
+    ) as mock_text_parse:
+        await handle_text_message(text_msg, bot_text, db_session, text_state)
+        mock_text_parse.assert_called_once_with(
+            text="Підготувати звіт",
+            user_timezone="America/New_York",
+            default_target_date=expected_tomorrow,
+        )
+    assert await text_state.get_state() == TaskIngestionState.waiting_confirmation.state
+    assert (await text_state.get_data())["from_tomorrow_plan"] is True
+
+
+@pytest.mark.asyncio
+async def test_planning_tomorrow_empty_extraction_keeps_planning_state(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #26: empty voice/text extraction while in planning_tomorrow replies EMPTY_TASKS_NOTIFICATION and retains planning_tomorrow."""
+    user_id = 91003
+    db_session.add(User(telegram_id=user_id, timezone="Europe/Kyiv"))
+    await db_session.commit()
+
+    state, _ = create_fsm_context(user_id=user_id, chat_id=user_id)
+    await state.set_state(TaskIngestionState.planning_tomorrow)
+
+    bot = AsyncMock(spec=Bot)
+    bot.send_chat_action = AsyncMock()
+    bot.download = AsyncMock()
+
+    # Empty text extraction
+    text_msg = AsyncMock(spec=Message)
+    text_msg.from_user = TgUser(id=user_id, is_bot=False, first_name="EmptyTomorrow")
+    text_msg.chat = Chat(id=user_id, type="private")
+    text_msg.text = "ммм ну не знаю"
+    text_msg.answer = AsyncMock()
+
+    with patch(
+        "src.bot.handlers.voice_text.parse_tasks_from_text",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        await handle_text_message(text_msg, bot, db_session, state)
+    text_msg.answer.assert_called_once_with(text=EMPTY_TASKS_NOTIFICATION)
+    assert await state.get_state() == TaskIngestionState.planning_tomorrow.state
+
+    # Empty voice extraction
+    voice_msg = AsyncMock(spec=Message)
+    voice_msg.from_user = TgUser(id=user_id, is_bot=False, first_name="EmptyTomorrow")
+    voice_msg.chat = Chat(id=user_id, type="private")
+    voice_msg.voice = Voice(file_id="vf_empty", file_unique_id="vu_empty", duration=2)
+    voice_msg.answer = AsyncMock()
+
+    with patch(
+        "src.bot.handlers.voice_text.parse_tasks_from_audio",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        await handle_voice_message(voice_msg, bot, db_session, state)
+    voice_msg.answer.assert_called_once_with(text=EMPTY_TASKS_NOTIFICATION)
+    assert await state.get_state() == TaskIngestionState.planning_tomorrow.state
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_planning_tomorrow_edit_restores_state_then_saves(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #26: full dispatcher flow: start -> text -> [✏️ Виправити] restores planning_tomorrow -> revised text -> [✅ Зберегти] saves & clears FSM."""
+    bind = db_session.bind
+    session_factory = async_sessionmaker(bind=bind, expire_on_commit=False, class_=AsyncSession)
+    dp = create_dispatcher(sessionmaker=session_factory)
+
+    telegram_id = 91004
+    db_user = User(telegram_id=telegram_id, timezone="Europe/Kyiv")
+    db_session.add(db_user)
+    await db_session.commit()
+
+    expected_tomorrow = get_user_local_time(db_user).date() + timedelta(days=1)
+    tg_user = TgUser(id=telegram_id, is_bot=False, first_name="TomorrowFlow")
+    chat = Chat(id=telegram_id, type="private")
+    key = StorageKey(bot_id=1, chat_id=telegram_id, user_id=telegram_id)
+
+    mock_bot = AsyncMock(spec=Bot)
+    mock_bot.id = 1
+    mock_bot.send_chat_action = AsyncMock()
+
+    # 1. Tap [📝 План на завтра]
+    start_cb = CallbackQuery(
+        id="cb_start_tmr",
+        from_user=tg_user,
+        chat_instance="ci_tmr",
+        message=Message(
+            message_id=401,
+            date=datetime.now(timezone.utc),
+            chat=chat,
+            from_user=tg_user,
+            text="🌙 Підсумки дня",
+        ),
+        data=PlanTomorrowCallback(action="start", user_id=telegram_id).pack(),
+    )
+    await dp.feed_update(bot=mock_bot, update=Update(update_id=401, callback_query=start_cb))
+    assert await dp.storage.get_state(key=key) == TaskIngestionState.planning_tomorrow.state
+
+    # 2. Send initial text draft
+    draft1 = [ExtractedTask(title="Перший варіант", target_date=expected_tomorrow)]
+    with patch(
+        "src.bot.handlers.voice_text.parse_tasks_from_text",
+        new_callable=AsyncMock,
+        return_value=draft1,
+    ) as mock_parse1:
+        msg1 = Message(
+            message_id=402,
+            date=datetime.now(timezone.utc),
+            chat=chat,
+            from_user=tg_user,
+            text="Перший варіант",
+        )
+        await dp.feed_update(bot=mock_bot, update=Update(update_id=402, message=msg1))
+        mock_parse1.assert_called_once_with(
+            text="Перший варіант",
+            user_timezone="Europe/Kyiv",
+            default_target_date=expected_tomorrow,
+        )
+    assert await dp.storage.get_state(key=key) == TaskIngestionState.waiting_confirmation.state
+
+    # 3. Tap [✏️ Виправити] -> must clear pending_tasks AND restore planning_tomorrow
+    edit_cb = CallbackQuery(
+        id="cb_edit_tmr",
+        from_user=tg_user,
+        chat_instance="ci_tmr",
+        message=Message(
+            message_id=403,
+            date=datetime.now(timezone.utc),
+            chat=chat,
+            from_user=tg_user,
+            text="Розпізнані завдання",
+        ),
+        data=TaskConfirmCallback(action="edit", user_id=telegram_id).pack(),
+    )
+    await dp.feed_update(bot=mock_bot, update=Update(update_id=403, callback_query=edit_cb))
+    assert await dp.storage.get_state(key=key) == TaskIngestionState.planning_tomorrow.state
+    assert "pending_tasks" not in (await dp.storage.get_data(key=key))
+
+    # 4. Send revised text -> must STILL receive default_target_date=expected_tomorrow
+    draft2 = [ExtractedTask(title="Фінальна задача на завтра", target_date=expected_tomorrow)]
+    with patch(
+        "src.bot.handlers.voice_text.parse_tasks_from_text",
+        new_callable=AsyncMock,
+        return_value=draft2,
+    ) as mock_parse2:
+        msg2 = Message(
+            message_id=404,
+            date=datetime.now(timezone.utc),
+            chat=chat,
+            from_user=tg_user,
+            text="Фінальна задача на завтра",
+        )
+        await dp.feed_update(bot=mock_bot, update=Update(update_id=404, message=msg2))
+        mock_parse2.assert_called_once_with(
+            text="Фінальна задача на завтра",
+            user_timezone="Europe/Kyiv",
+            default_target_date=expected_tomorrow,
+        )
+
+    # 5. Tap [✅ Зберегти] -> saves task for tomorrow and clears FSM state
+    save_cb = CallbackQuery(
+        id="cb_save_tmr",
+        from_user=tg_user,
+        chat_instance="ci_tmr",
+        message=Message(
+            message_id=405,
+            date=datetime.now(timezone.utc),
+            chat=chat,
+            from_user=tg_user,
+            text="Розпізнані завдання",
+        ),
+        data=TaskConfirmCallback(action="save", user_id=telegram_id).pack(),
+    )
+    await dp.feed_update(bot=mock_bot, update=Update(update_id=405, callback_query=save_cb))
+
+    assert await dp.storage.get_state(key=key) is None
+    saved_tasks = list(
+        (await db_session.execute(select(Task).where(Task.user_id == telegram_id))).scalars().all()
+    )
+    assert len(saved_tasks) == 1
+    assert saved_tasks[0].title == "Фінальна задача на завтра"
+    assert saved_tasks[0].target_date == expected_tomorrow
+    assert saved_tasks[0].status == TaskStatus.todo
+
+    # Verify SendMessage was emitted for the planning prompt
+    send_calls = [
+        call.args[0]
+        for call in mock_bot.call_args_list
+        if call.args and isinstance(call.args[0], SendMessage)
+    ]
+    assert any("Планування на завтра" in c.text for c in send_calls)
+
+
+@pytest.mark.asyncio
+async def test_planning_tomorrow_delete_discards_and_clears_fsm(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #26: [🗑️ Видалити] on a tomorrow-planning draft discards tasks and clears FSM state completely."""
+    user_id = 91005
+    state, _ = create_fsm_context(user_id=user_id, chat_id=user_id)
+    await state.set_state(TaskIngestionState.waiting_confirmation)
+    await state.update_data(
+        pending_tasks=[{"title": "Скасувати завтра", "target_date": "2026-11-22"}],
+        from_tomorrow_plan=True,
+    )
+
+    msg = AsyncMock(spec=Message)
+    msg.edit_text = AsyncMock()
+    cb = AsyncMock(spec=CallbackQuery)
+    cb.from_user = TgUser(id=user_id, is_bot=False, first_name="DeleteTomorrow")
+    cb.message = msg
+    cb.answer = AsyncMock()
+
+    await task_confirm_callback(
+        callback_query=cb,
+        callback_data=TaskConfirmCallback(action="delete", user_id=user_id),
+        session=db_session,
+        state=state,
+    )
+
+    assert await state.get_state() is None
+    assert (await state.get_data()) == {}
+    msg.edit_text.assert_called_once_with(
+        text="🗑️ <b>Завдання скасовано та видалено.</b>",
+        reply_markup=None,
+    )
+    cb.answer.assert_called_once_with("Скасовано!")
+    saved = list((await db_session.execute(select(Task).where(Task.user_id == user_id))).scalars().all())
+    assert len(saved) == 0

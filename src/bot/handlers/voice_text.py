@@ -1,6 +1,6 @@
 """Voice and text task ingestion bot handlers."""
 
-from datetime import timezone
+from datetime import timedelta, timezone
 import io
 import logging
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -16,7 +16,7 @@ from src.bot.states.tasks import TaskIngestionState
 from src.models.task import TaskPriority
 from src.schemas.task import ExtractedTask
 from src.services.ai_parser import parse_tasks_from_audio, parse_tasks_from_text
-from src.services.user_service import get_or_create_user
+from src.services.user_service import get_or_create_user, get_user_local_time
 
 logger = logging.getLogger(__name__)
 
@@ -134,15 +134,28 @@ async def handle_voice_message(
     await bot.download(message.voice.file_id, destination=audio_buffer)
     audio_bytes = audio_buffer.getvalue()
 
-    tasks = await parse_tasks_from_audio(
-        audio_bytes=audio_bytes,
-        user_timezone=user.timezone,
-    )
+    current_state = await state.get_state()
+    is_planning_tomorrow = current_state == TaskIngestionState.planning_tomorrow.state
+    if is_planning_tomorrow:
+        tomorrow = get_user_local_time(user).date() + timedelta(days=1)
+        tasks = await parse_tasks_from_audio(
+            audio_bytes=audio_bytes,
+            user_timezone=user.timezone,
+            default_target_date=tomorrow,
+        )
+    else:
+        tasks = await parse_tasks_from_audio(
+            audio_bytes=audio_bytes,
+            user_timezone=user.timezone,
+        )
 
     if not tasks:
         return await message.answer(text=EMPTY_TASKS_NOTIFICATION)
 
-    await state.update_data(pending_tasks=[t.model_dump(mode="json") for t in tasks])
+    await state.update_data(
+        pending_tasks=[t.model_dump(mode="json") for t in tasks],
+        from_tomorrow_plan=is_planning_tomorrow,
+    )
     await state.set_state(TaskIngestionState.waiting_confirmation)
 
     formatted_text = format_extracted_tasks_message(tasks, user_timezone=user.timezone)
@@ -163,7 +176,8 @@ async def handle_text_message(
     - Safely returns None if message.from_user or message.text is empty/whitespace.
     - Resolves user timezone from database via get_or_create_user.
     - Dispatches chat action TYPING.
-    - Invokes Gemini AI parser with text and user timezone.
+    - Invokes Gemini AI parser with text and user timezone (and tomorrow as default_target_date
+      when in TaskIngestionState.planning_tomorrow).
     - If no tasks extracted, replies with polite notification without keyboard or FSM update.
     - If tasks extracted, saves pending tasks to FSM, sets waiting_confirmation state,
       and replies with formatted tasks list and confirmation keyboard.
@@ -175,15 +189,28 @@ async def handle_text_message(
 
     await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
 
-    tasks = await parse_tasks_from_text(
-        text=message.text,
-        user_timezone=user.timezone,
-    )
+    current_state = await state.get_state()
+    is_planning_tomorrow = current_state == TaskIngestionState.planning_tomorrow.state
+    if is_planning_tomorrow:
+        tomorrow = get_user_local_time(user).date() + timedelta(days=1)
+        tasks = await parse_tasks_from_text(
+            text=message.text,
+            user_timezone=user.timezone,
+            default_target_date=tomorrow,
+        )
+    else:
+        tasks = await parse_tasks_from_text(
+            text=message.text,
+            user_timezone=user.timezone,
+        )
 
     if not tasks:
         return await message.answer(text=EMPTY_TASKS_NOTIFICATION)
 
-    await state.update_data(pending_tasks=[t.model_dump(mode="json") for t in tasks])
+    await state.update_data(
+        pending_tasks=[t.model_dump(mode="json") for t in tasks],
+        from_tomorrow_plan=is_planning_tomorrow,
+    )
     await state.set_state(TaskIngestionState.waiting_confirmation)
 
     formatted_text = format_extracted_tasks_message(tasks, user_timezone=user.timezone)
