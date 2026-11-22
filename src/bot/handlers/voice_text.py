@@ -1,7 +1,9 @@
 """Voice and text task ingestion bot handlers."""
 
+from datetime import timezone
 import io
 import logging
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction
@@ -26,15 +28,40 @@ EMPTY_TASKS_NOTIFICATION = (
 )
 
 
-def format_extracted_tasks_message(tasks: list[ExtractedTask]) -> str:
+def format_extracted_tasks_message(
+    tasks: list[ExtractedTask],
+    user_timezone: str | None = None,
+) -> str:
     """Format extracted tasks into an HTML-formatted message with semantic emojis.
 
     Adheres to _docs/design-system.md:
     Header: <b>📋 Розпізнані завдання:</b>
-    Items: • [Назва задачі] — ⚠️ Високий | 🏷️ #робота | 📅 {target_date} | 🕒 до {time}
+    Items: • [Назва задачі] — ⚠️ Високий | 🏷️ #робота | 📅 {target_date} | <b>🕒 до {time}</b>
+
+    When ``user_timezone`` is provided, deadline timestamps (aware UTC or naive
+    treated as UTC) are converted into the user's local timezone before formatting,
+    with safe fallback to ``Europe/Kyiv`` on invalid/blank timezone strings.
+    When ``user_timezone`` is ``None``, deadlines are formatted in their existing
+    timezone without conversion for backward compatibility.
     """
     if not tasks:
         return ""
+
+    target_tz: ZoneInfo | None = None
+    if user_timezone is not None:
+        tz_name = user_timezone.strip()
+        if tz_name:
+            try:
+                target_tz = ZoneInfo(tz_name)
+            except (ZoneInfoNotFoundError, KeyError, ValueError):
+                logger.warning(
+                    "Invalid user timezone %r in format_extracted_tasks_message; "
+                    "falling back to Europe/Kyiv",
+                    user_timezone,
+                )
+                target_tz = ZoneInfo("Europe/Kyiv")
+        else:
+            target_tz = ZoneInfo("Europe/Kyiv")
 
     lines = ["<b>📋 Розпізнані завдання:</b>\n"]
     for task in tasks:
@@ -59,7 +86,17 @@ def format_extracted_tasks_message(tasks: list[ExtractedTask]) -> str:
 
         # Formatted deadline
         if task.deadline_at:
-            meta_parts.append(f"🕒 до {task.deadline_at.strftime('%H:%M')}")
+            if target_tz is not None:
+                deadline_dt = task.deadline_at
+                if (
+                    deadline_dt.tzinfo is None
+                    or deadline_dt.tzinfo.utcoffset(deadline_dt) is None
+                ):
+                    deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
+                deadline_display = deadline_dt.astimezone(target_tz)
+            else:
+                deadline_display = task.deadline_at
+            meta_parts.append(f"<b>🕒 до {deadline_display.strftime('%H:%M')}</b>")
 
         meta_str = " | ".join(meta_parts)
         lines.append(f"• {task.title} — {meta_str}")
@@ -108,7 +145,7 @@ async def handle_voice_message(
     await state.update_data(pending_tasks=[t.model_dump(mode="json") for t in tasks])
     await state.set_state(TaskIngestionState.waiting_confirmation)
 
-    formatted_text = format_extracted_tasks_message(tasks)
+    formatted_text = format_extracted_tasks_message(tasks, user_timezone=user.timezone)
     keyboard = get_task_confirmation_keyboard(user_id=message.from_user.id)
     return await message.answer(text=formatted_text, reply_markup=keyboard)
 
@@ -149,6 +186,6 @@ async def handle_text_message(
     await state.update_data(pending_tasks=[t.model_dump(mode="json") for t in tasks])
     await state.set_state(TaskIngestionState.waiting_confirmation)
 
-    formatted_text = format_extracted_tasks_message(tasks)
+    formatted_text = format_extracted_tasks_message(tasks, user_timezone=user.timezone)
     keyboard = get_task_confirmation_keyboard(user_id=message.from_user.id)
     return await message.answer(text=formatted_text, reply_markup=keyboard)

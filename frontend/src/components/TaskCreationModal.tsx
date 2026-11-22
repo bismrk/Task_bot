@@ -238,15 +238,30 @@ export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
             <div className="space-y-1.5">
               <label htmlFor="task-deadline" className="text-xs font-semibold text-muted uppercase tracking-wider flex items-center gap-1">
                 <Clock className="w-3.5 h-3.5 text-primary" />
-                <span>Дедлайн (Час)</span>
+                <span>Дедлайн (необов&apos;язково)</span>
               </label>
-              <input
-                id="task-deadline"
-                type="time"
-                value={deadlineTime}
-                onChange={(e) => setDeadlineTime(e.target.value)}
-                className="w-full px-3.5 py-2 rounded-xl bg-secondary border border-transparent focus:border-primary focus:bg-background outline-hidden text-sm text-foreground transition-all"
-              />
+              <div className="flex items-center gap-1.5">
+                <input
+                  id="task-deadline"
+                  type="time"
+                  value={deadlineTime}
+                  onChange={(e) => setDeadlineTime(e.target.value)}
+                  className="flex-1 min-w-0 w-full px-3.5 py-2 rounded-xl bg-secondary border border-transparent focus:border-primary focus:bg-background outline-hidden text-sm text-foreground transition-all"
+                />
+                {deadlineTime && (
+                  <button
+                    type="button"
+                    aria-label="Очистити дедлайн"
+                    onClick={() => {
+                      triggerHaptic('light');
+                      setDeadlineTime('');
+                    }}
+                    className="shrink-0 px-2.5 py-2 rounded-xl bg-secondary text-muted hover:text-red-500 hover:bg-red-500/10 border border-transparent transition-colors text-xs font-semibold cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 

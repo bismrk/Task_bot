@@ -142,6 +142,184 @@ def test_format_extracted_tasks_message_empty() -> None:
     assert format_extracted_tasks_message([]) == ""
 
 
+def test_format_extracted_tasks_message_local_timezones_and_html() -> None:
+    """Verifies REQ-AI-02, REQ-AI-03, REQ-USR-01: Local timezone conversion, HTML bold deadlines, naive UTC, fallback, and untimed omission."""
+    tasks = [
+        ExtractedTask(
+            title="Вечірній звіт",
+            target_date=date(2026, 11, 20),
+            deadline_at=datetime(2026, 11, 20, 18, 0, tzinfo=timezone.utc),
+            priority=TaskPriority.high,
+            tag="робота",
+        ),
+        ExtractedTask(
+            title="Ранковий рейс",
+            target_date=date(2026, 11, 20),
+            deadline_at=datetime(2026, 11, 20, 3, 0, tzinfo=timezone.utc),
+            priority=TaskPriority.medium,
+            tag=None,
+        ),
+        ExtractedTask(
+            title="Завдання без часу",
+            target_date=date(2026, 11, 20),
+            deadline_at=None,
+            priority=TaskPriority.low,
+            tag="дім",
+        ),
+    ]
+
+    # 1. Backward compatibility when user_timezone=None (no shift, HTML bold)
+    formatted_default = format_extracted_tasks_message(tasks)
+    assert "<b>🕒 до 18:00</b>" in formatted_default
+    assert "<b>🕒 до 03:00</b>" in formatted_default
+    untimed_line_default = next(
+        line for line in formatted_default.splitlines() if "Завдання без часу" in line
+    )
+    assert "🕒" not in untimed_line_default
+
+    # 2. Europe/Kyiv winter (UTC+2): 18:00 UTC -> 20:00, 03:00 UTC -> 05:00
+    formatted_kyiv = format_extracted_tasks_message(tasks, user_timezone="Europe/Kyiv")
+    assert "<b>🕒 до 20:00</b>" in formatted_kyiv
+    assert "<b>🕒 до 05:00</b>" in formatted_kyiv
+    untimed_line_kyiv = next(
+        line for line in formatted_kyiv.splitlines() if "Завдання без часу" in line
+    )
+    assert "🕒" not in untimed_line_kyiv
+
+    # 3. Non-Kyiv timezone America/New_York winter (EST, UTC-5): 18:00 UTC -> 13:00, 03:00 UTC -> 22:00
+    formatted_ny = format_extracted_tasks_message(tasks, user_timezone="America/New_York")
+    assert "<b>🕒 до 13:00</b>" in formatted_ny
+    assert "<b>🕒 до 22:00</b>" in formatted_ny
+
+    # 4. Invalid / blank timezone strings safely fall back to Europe/Kyiv
+    for bad_tz in ("Invalid/Zone", "Mars/Olympus", "   ", ""):
+        formatted_fallback = format_extracted_tasks_message(tasks, user_timezone=bad_tz)
+        assert "<b>🕒 до 20:00</b>" in formatted_fallback
+        assert "<b>🕒 до 05:00</b>" in formatted_fallback
+
+    # 5. Naive datetime treated as UTC before converting to local timezone
+    naive_tasks = [
+        ExtractedTask.model_construct(
+            title="Наївний дедлайн",
+            target_date=date(2026, 11, 20),
+            deadline_at=datetime(2026, 11, 20, 18, 0),
+            priority=TaskPriority.medium,
+            tag=None,
+            recurrence=None,
+        )
+    ]
+    formatted_naive_kyiv = format_extracted_tasks_message(
+        naive_tasks, user_timezone="Europe/Kyiv"
+    )
+    assert "<b>🕒 до 20:00</b>" in formatted_naive_kyiv
+    formatted_naive_ny = format_extracted_tasks_message(
+        naive_tasks, user_timezone="America/New_York"
+    )
+    assert "<b>🕒 до 13:00</b>" in formatted_naive_ny
+
+
+@pytest.mark.asyncio
+async def test_handle_voice_and_text_render_local_deadline_times(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies REQ-AI-01, REQ-AI-02, REQ-USR-01: Voice and text handlers format deadlines in user's local timezone."""
+    # Pre-create two users in different timezones
+    kyiv_user_id = 80101
+    ny_user_id = 80102
+    db_session.add_all(
+        [
+            User(telegram_id=kyiv_user_id, timezone="Europe/Kyiv"),
+            User(telegram_id=ny_user_id, timezone="America/New_York"),
+        ]
+    )
+    await db_session.commit()
+
+    extracted = [
+        ExtractedTask(
+            title="Ранковий дзвінок",
+            target_date=date(2026, 11, 20),
+            deadline_at=datetime(2026, 11, 20, 3, 0, tzinfo=timezone.utc),
+            priority=TaskPriority.high,
+            tag="робота",
+        ),
+        ExtractedTask(
+            title="Купити хліб",
+            target_date=date(2026, 11, 20),
+            deadline_at=None,
+            priority=TaskPriority.low,
+        ),
+    ]
+
+    # Voice message for Europe/Kyiv user (03:00 UTC -> 05:00 local)
+    bot_voice = AsyncMock(spec=Bot)
+    bot_voice.id = 1
+    bot_voice.send_chat_action = AsyncMock()
+
+    async def fake_download(file_id: str, destination: io.BytesIO) -> None:
+        destination.write(b"voice_bytes")
+
+    bot_voice.download = AsyncMock(side_effect=fake_download)
+    voice_state, _ = create_fsm_context(user_id=kyiv_user_id, chat_id=kyiv_user_id)
+    voice_msg = AsyncMock(spec=Message)
+    voice_msg.from_user = TgUser(id=kyiv_user_id, is_bot=False, first_name="KyivVoice")
+    voice_msg.chat = Chat(id=kyiv_user_id, type="private")
+    voice_msg.voice = Voice(file_id="vf_tz", file_unique_id="vu_tz", duration=3)
+    voice_msg.answer = AsyncMock()
+
+    with patch(
+        "src.bot.handlers.voice_text.parse_tasks_from_audio",
+        new_callable=AsyncMock,
+        return_value=extracted,
+    ):
+        await handle_voice_message(
+            message=voice_msg,
+            bot=bot_voice,
+            session=db_session,
+            state=voice_state,
+        )
+
+    voice_reply_text = voice_msg.answer.call_args.kwargs["text"]
+    assert "<b>🕒 до 05:00</b>" in voice_reply_text
+    assert "🕒" not in next(
+        line for line in voice_reply_text.splitlines() if "Купити хліб" in line
+    )
+
+    # Text message for America/New_York user (18:00 UTC -> 13:00 local)
+    extracted_ny = [
+        ExtractedTask(
+            title="Надіслати рахунок",
+            target_date=date(2026, 11, 20),
+            deadline_at=datetime(2026, 11, 20, 18, 0, tzinfo=timezone.utc),
+            priority=TaskPriority.high,
+            tag="фінанси",
+        )
+    ]
+    bot_text = AsyncMock(spec=Bot)
+    bot_text.id = 1
+    bot_text.send_chat_action = AsyncMock()
+    text_state, _ = create_fsm_context(user_id=ny_user_id, chat_id=ny_user_id)
+    text_msg = AsyncMock(spec=Message)
+    text_msg.from_user = TgUser(id=ny_user_id, is_bot=False, first_name="NyText")
+    text_msg.chat = Chat(id=ny_user_id, type="private")
+    text_msg.text = "Надіслати рахунок до 13:00"
+    text_msg.answer = AsyncMock()
+
+    with patch(
+        "src.bot.handlers.voice_text.parse_tasks_from_text",
+        new_callable=AsyncMock,
+        return_value=extracted_ny,
+    ):
+        await handle_text_message(
+            message=text_msg,
+            bot=bot_text,
+            session=db_session,
+            state=text_state,
+        )
+
+    text_reply_text = text_msg.answer.call_args.kwargs["text"]
+    assert "<b>🕒 до 13:00</b>" in text_reply_text
+
+
 # ==============================================================================
 # Voice Message Handler Tests (REQ-AI-01, REQ-AI-02)
 # ==============================================================================

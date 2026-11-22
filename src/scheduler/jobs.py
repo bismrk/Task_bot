@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 import html
 import logging
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
@@ -31,6 +31,21 @@ def _normalize_utc(dt: datetime | None) -> datetime:
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _resolve_user_timezone(tz_name: str | None) -> ZoneInfo:
+    """Resolve an IANA timezone name with safe fallback to Europe/Kyiv."""
+    if tz_name:
+        cleaned = tz_name.strip()
+        if cleaned:
+            try:
+                return ZoneInfo(cleaned)
+            except (ZoneInfoNotFoundError, KeyError, ValueError):
+                logger.warning(
+                    "Invalid timezone %r encountered; falling back to Europe/Kyiv",
+                    tz_name,
+                )
+    return ZoneInfo("Europe/Kyiv")
 
 
 async def process_user_midnight_rollover(
@@ -503,11 +518,7 @@ async def run_deadline_checks(
                 if 0 < delta_sec <= 600:
                     if not task.reminder_sent_10m:
                         user = await session.get(User, task.user_id)
-                        user_tz = (
-                            ZoneInfo(user.timezone)
-                            if user and user.timezone
-                            else ZoneInfo("Europe/Kyiv")
-                        )
+                        user_tz = _resolve_user_timezone(user.timezone if user else None)
                         deadline_local = deadline_utc.astimezone(user_tz)
                         time_str = deadline_local.strftime("%H:%M")
 
@@ -554,11 +565,7 @@ async def run_deadline_checks(
                 elif 600 < delta_sec <= 3600:
                     if not task.reminder_sent_1h:
                         user = await session.get(User, task.user_id)
-                        user_tz = (
-                            ZoneInfo(user.timezone)
-                            if user and user.timezone
-                            else ZoneInfo("Europe/Kyiv")
-                        )
+                        user_tz = _resolve_user_timezone(user.timezone if user else None)
                         deadline_local = deadline_utc.astimezone(user_tz)
                         time_str = deadline_local.strftime("%H:%M")
 

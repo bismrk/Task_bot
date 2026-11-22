@@ -10,6 +10,8 @@ interface TaskCardProps {
 
 export const TaskCard: React.FC<TaskCardProps> = ({ task, onToggle, onDelete }) => {
   const isDone = task.status === 'done';
+  const isActive = task.status === 'todo';
+  const isInactive = task.status === 'done' || task.status === 'canceled';
 
   const handleToggleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -61,6 +63,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task, onToggle, onDelete }) 
     if (!isoString) return null;
     try {
       const d = new Date(isoString);
+      if (isNaN(d.getTime())) return null;
       return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
     } catch {
       return null;
@@ -131,11 +134,38 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task, onToggle, onDelete }) 
   const formattedDeadline = formatDeadline(task.deadline_at);
   const formattedRecurrence = formatRecurrence(task.recurrence);
 
+  const deadlineMs = task.deadline_at ? new Date(task.deadline_at).getTime() : NaN;
+  const hasValidDeadline = formattedDeadline !== null && !isNaN(deadlineMs);
+  const remainingMs = hasValidDeadline ? deadlineMs - Date.now() : null;
+  const isUrgentTimed = isActive && remainingMs !== null && remainingMs <= 60 * 60 * 1000;
+  const isActiveTimed = isActive && remainingMs !== null && remainingMs > 60 * 60 * 1000;
+
+  const getCardClasses = (): string => {
+    if (isInactive) {
+      return 'bg-secondary/40 border border-black/5 dark:border-white/5';
+    }
+    if (isUrgentTimed) {
+      return 'border border-red-500/25 border-l-4 border-l-red-500 bg-red-500/5 hover:bg-red-500/10';
+    }
+    if (isActiveTimed) {
+      return 'border border-orange-500/20 border-l-4 border-l-orange-500 bg-orange-500/5 hover:bg-orange-500/10';
+    }
+    return 'bg-secondary/70 hover:bg-secondary border border-black/5 dark:border-white/5';
+  };
+
+  const getDeadlinePillClasses = (): string => {
+    if (isInactive) {
+      return 'bg-background/70 text-muted border-black/5 dark:border-white/5 font-medium opacity-60';
+    }
+    if (isUrgentTimed) {
+      return 'bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/30 font-semibold';
+    }
+    return 'bg-orange-500/15 text-orange-600 dark:text-orange-400 border-orange-500/30 font-semibold';
+  };
+
   return (
     <div
-      className={`group relative p-3.5 rounded-2xl bg-secondary/70 hover:bg-secondary border border-black/5 dark:border-white/5 transition-all duration-200 flex items-start gap-3 shadow-sm ${
-        isDone ? 'bg-secondary/40' : ''
-      }`}
+      className={`group relative p-3.5 rounded-2xl transition-all duration-200 flex items-start gap-3 shadow-sm ${getCardClasses()}`}
     >
       {/* Animated Circular Checkbox */}
       <button
@@ -157,7 +187,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task, onToggle, onDelete }) 
       <div className="flex-1 min-w-0 flex flex-col gap-1.5 cursor-pointer" onClick={handleToggleClick}>
         <p
           className={`text-sm font-medium leading-snug break-words transition-all duration-200 ${
-            isDone ? 'line-through opacity-60 text-muted' : 'text-foreground'
+            isInactive ? 'line-through opacity-60 text-muted' : 'text-foreground'
           }`}
         >
           {task.title}
@@ -183,8 +213,10 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task, onToggle, onDelete }) 
 
           {/* Deadline Countdown/Indicator */}
           {formattedDeadline && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-background/70 text-muted border border-black/5 dark:border-white/5">
-              🕒 {formattedDeadline}
+            <span
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] border ${getDeadlinePillClasses()}`}
+            >
+              🕒 до {formattedDeadline}
             </span>
           )}
 

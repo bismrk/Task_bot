@@ -811,6 +811,186 @@ async def test_unexpected_exception_isolation(
     assert task2.reminder_sent_10m is True
 
 
+@pytest.mark.asyncio
+async def test_24_7_early_morning_multi_task_independent_reminders(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies REQ-SCH-03, REQ-NFR-03: 24/7 early-morning multi-task -1h and -10m independent alerts without quiet-hour suppression."""
+    user = User(telegram_id=601, timezone="Europe/Kyiv")
+    db_session.add(user)
+    await db_session.commit()
+
+    # Winter Europe/Kyiv (UTC+2) on 2026-11-21:
+    # Task A: 05:00 local == 03:00 UTC
+    # Task B: 08:00 local == 06:00 UTC
+    # Task C: untimed (deadline_at = None)
+    task_a = Task(
+        user_id=user.telegram_id,
+        title="Ранковий виліт",
+        target_date=date(2026, 11, 21),
+        deadline_at=datetime(2026, 11, 21, 3, 0, 0, tzinfo=timezone.utc),
+        priority=TaskPriority.high,
+        tag="подорож",
+        status=TaskStatus.todo,
+        reminder_sent_1h=False,
+        reminder_sent_10m=False,
+    )
+    task_b = Task(
+        user_id=user.telegram_id,
+        title="Ранкова зустріч",
+        target_date=date(2026, 11, 21),
+        deadline_at=datetime(2026, 11, 21, 6, 0, 0, tzinfo=timezone.utc),
+        priority=TaskPriority.medium,
+        tag="робота",
+        status=TaskStatus.todo,
+        reminder_sent_1h=False,
+        reminder_sent_10m=False,
+    )
+    task_c = Task(
+        user_id=user.telegram_id,
+        title="Завдання без дедлайну",
+        target_date=date(2026, 11, 21),
+        deadline_at=None,
+        priority=TaskPriority.low,
+        status=TaskStatus.todo,
+        reminder_sent_1h=False,
+        reminder_sent_10m=False,
+    )
+    db_session.add_all([task_a, task_b, task_c])
+    await db_session.commit()
+
+    # 1. At 03:59 local (01:59 UTC): 0 reminders sent
+    stats_0359 = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=datetime(2026, 11, 21, 1, 59, 0, tzinfo=timezone.utc),
+    )
+    assert stats_0359 == {"reminders_1h_sent": 0, "reminders_10m_sent": 0, "errors": 0}
+    mock_bot.send_message.assert_not_called()
+
+    # 2. At 04:00 local (02:00 UTC): Task A triggers -1h (🕒 до 05:00); Task B does not trigger
+    stats_0400 = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=datetime(2026, 11, 21, 2, 0, 0, tzinfo=timezone.utc),
+    )
+    assert stats_0400 == {"reminders_1h_sent": 1, "reminders_10m_sent": 0, "errors": 0}
+    mock_bot.send_message.assert_called_once()
+    msg_a_1h = mock_bot.send_message.call_args.kwargs["text"]
+    assert "⏳" in msg_a_1h
+    assert "Ранковий виліт" in msg_a_1h
+    assert "🕒 до 05:00" in msg_a_1h
+
+    await db_session.refresh(task_a)
+    await db_session.refresh(task_b)
+    await db_session.refresh(task_c)
+    assert task_a.reminder_sent_1h is True
+    assert task_a.reminder_sent_10m is False
+    assert task_b.reminder_sent_1h is False
+    assert task_b.reminder_sent_10m is False
+    assert task_c.reminder_sent_1h is False
+    assert task_c.reminder_sent_10m is False
+
+    # 3. At 04:50 local (02:50 UTC): Task A triggers -10m (🕒 до 05:00); Task B does not trigger
+    mock_bot.send_message.reset_mock()
+    stats_0450 = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=datetime(2026, 11, 21, 2, 50, 0, tzinfo=timezone.utc),
+    )
+    assert stats_0450 == {"reminders_1h_sent": 0, "reminders_10m_sent": 1, "errors": 0}
+    mock_bot.send_message.assert_called_once()
+    msg_a_10m = mock_bot.send_message.call_args.kwargs["text"]
+    assert "🚨" in msg_a_10m
+    assert "Ранковий виліт" in msg_a_10m
+    assert "🕒 до 05:00" in msg_a_10m
+
+    await db_session.refresh(task_a)
+    await db_session.refresh(task_b)
+    assert task_a.reminder_sent_1h is True
+    assert task_a.reminder_sent_10m is True
+    assert task_b.reminder_sent_1h is False
+    assert task_b.reminder_sent_10m is False
+
+    # 4. At 07:00 local (05:00 UTC): Task B triggers -1h (🕒 до 08:00); Task A does not re-trigger
+    mock_bot.send_message.reset_mock()
+    stats_0700 = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=datetime(2026, 11, 21, 5, 0, 0, tzinfo=timezone.utc),
+    )
+    assert stats_0700 == {"reminders_1h_sent": 1, "reminders_10m_sent": 0, "errors": 0}
+    mock_bot.send_message.assert_called_once()
+    msg_b_1h = mock_bot.send_message.call_args.kwargs["text"]
+    assert "⏳" in msg_b_1h
+    assert "Ранкова зустріч" in msg_b_1h
+    assert "🕒 до 08:00" in msg_b_1h
+
+    await db_session.refresh(task_b)
+    assert task_b.reminder_sent_1h is True
+    assert task_b.reminder_sent_10m is False
+
+    # 5. At 07:50 local (05:50 UTC): Task B triggers -10m (🕒 до 08:00); Task A does not re-trigger; Task C never triggers
+    mock_bot.send_message.reset_mock()
+    stats_0750 = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=datetime(2026, 11, 21, 5, 50, 0, tzinfo=timezone.utc),
+    )
+    assert stats_0750 == {"reminders_1h_sent": 0, "reminders_10m_sent": 1, "errors": 0}
+    mock_bot.send_message.assert_called_once()
+    msg_b_10m = mock_bot.send_message.call_args.kwargs["text"]
+    assert "🚨" in msg_b_10m
+    assert "Ранкова зустріч" in msg_b_10m
+    assert "🕒 до 08:00" in msg_b_10m
+
+    await db_session.refresh(task_a)
+    await db_session.refresh(task_b)
+    await db_session.refresh(task_c)
+    assert task_a.reminder_sent_1h is True
+    assert task_a.reminder_sent_10m is True
+    assert task_b.reminder_sent_1h is True
+    assert task_b.reminder_sent_10m is True
+    assert task_c.reminder_sent_1h is False
+    assert task_c.reminder_sent_10m is False
+
+
+@pytest.mark.asyncio
+async def test_deadline_check_invalid_user_timezone_falls_back_to_kyiv(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies REQ-SCH-03, REQ-NFR-02: Invalid user timezone safely falls back to Europe/Kyiv."""
+    user = User(telegram_id=602, timezone="Mars/Olympus")
+    db_session.add(user)
+    await db_session.commit()
+
+    # 03:00 UTC -> 05:00 Europe/Kyiv (winter UTC+2)
+    task = Task(
+        user_id=user.telegram_id,
+        title="Резервний часовий пояс",
+        target_date=date(2026, 11, 21),
+        deadline_at=datetime(2026, 11, 21, 3, 0, 0, tzinfo=timezone.utc),
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    stats = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=datetime(2026, 11, 21, 2, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert stats == {"reminders_1h_sent": 1, "reminders_10m_sent": 0, "errors": 0}
+    mock_bot.send_message.assert_called_once()
+    assert "🕒 до 05:00" in mock_bot.send_message.call_args.kwargs["text"]
+
+
 # ==============================================================================
 # Scheduler Registration Tests (REQ-SCH-03)
 # ==============================================================================
