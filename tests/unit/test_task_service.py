@@ -19,9 +19,11 @@ from src.services.task_service import (
     create_task,
     create_tasks_batch,
     delete_task,
+    ensure_recurring_tasks_for_date,
     get_overdue_tasks,
     get_task,
     get_tasks_for_date,
+    is_recurrence_active_on_date,
     rollover_task,
     toggle_task_status,
     update_task,
@@ -805,3 +807,151 @@ def test_task_read_schema_from_attributes() -> None:
     assert read_model.reminder_sent_1h is False
     assert read_model.reminder_sent_10m is False
     assert read_model.created_at == now
+
+
+def test_task_recurrence_schema_validation() -> None:
+    """Verifies recurrence validator on TaskCreate and TaskUpdate schemas."""
+    # Accepted values
+    t1 = TaskCreate(title="Task", target_date=date(2026, 11, 20), recurrence=None)
+    assert t1.recurrence is None
+
+    t2 = TaskCreate(title="Task", target_date=date(2026, 11, 20), recurrence="daily")
+    assert t2.recurrence == "daily"
+
+    t3 = TaskCreate(title="Task", target_date=date(2026, 11, 20), recurrence="weekdays")
+    assert t3.recurrence == "weekdays"
+
+    # Canonical sorting and whitespace stripping
+    t4 = TaskCreate(title="Task", target_date=date(2026, 11, 20), recurrence="weekdays:[6, 1, 3]")
+    assert t4.recurrence == "weekdays:[1,3,6]"
+
+    # Deduplication
+    t5 = TaskCreate(title="Task", target_date=date(2026, 11, 20), recurrence="weekdays:[1, 1, 3]")
+    assert t5.recurrence == "weekdays:[1,3]"
+
+    # Rejection of out of range
+    with pytest.raises(ValidationError):
+        TaskCreate(title="Task", target_date=date(2026, 11, 20), recurrence="weekdays:[7]")
+
+    with pytest.raises(ValidationError):
+        TaskCreate(title="Task", target_date=date(2026, 11, 20), recurrence="weekdays:[-1]")
+
+    # Rejection of empty list
+    with pytest.raises(ValidationError):
+        TaskCreate(title="Task", target_date=date(2026, 11, 20), recurrence="weekdays:[]")
+
+    with pytest.raises(ValidationError):
+        TaskCreate(title="Task", target_date=date(2026, 11, 20), recurrence="weekdays:[   ]")
+
+    # Rejection of unknown strings
+    with pytest.raises(ValidationError):
+        TaskCreate(title="Task", target_date=date(2026, 11, 20), recurrence="monthly")
+
+    with pytest.raises(ValidationError):
+        TaskCreate(title="Task", target_date=date(2026, 11, 20), recurrence="invalid")
+
+    with pytest.raises(ValidationError):
+        TaskCreate(title="Task", target_date=date(2026, 11, 20), recurrence="")
+
+    # TaskUpdate validator verification
+    u1 = TaskUpdate(recurrence="weekdays:[5, 2]")
+    assert u1.recurrence == "weekdays:[2,5]"
+
+    with pytest.raises(ValidationError):
+        TaskUpdate(recurrence="weekdays:[8]")
+
+
+def test_is_recurrence_active_on_date_custom_weekdays() -> None:
+    """Verifies is_recurrence_active_on_date evaluation for custom weekdays and edge cases."""
+    dates = {
+        0: date(2026, 11, 23),
+        1: date(2026, 11, 24),
+        2: date(2026, 11, 25),
+        3: date(2026, 11, 26),
+        4: date(2026, 11, 27),
+        5: date(2026, 11, 28),
+        6: date(2026, 11, 29),
+    }
+
+    # 1. Custom list: [1, 3, 6] (Tue, Thu, Sun)
+    rec_custom = "weekdays:[1,3,6]"
+    for day_idx, d in dates.items():
+        if day_idx in (1, 3, 6):
+            assert is_recurrence_active_on_date(rec_custom, d) is True
+        else:
+            assert is_recurrence_active_on_date(rec_custom, d) is False
+
+    # 2. Weekdays: [0, 4] (Mon, Fri)
+    rec_mf = "weekdays:[0,4]"
+    for day_idx, d in dates.items():
+        if day_idx in (0, 4):
+            assert is_recurrence_active_on_date(rec_mf, d) is True
+        else:
+            assert is_recurrence_active_on_date(rec_mf, d) is False
+
+    # 3. Weekend: [5, 6] (Sat, Sun)
+    rec_weekend = "weekdays:[5,6]"
+    for day_idx, d in dates.items():
+        if day_idx in (5, 6):
+            assert is_recurrence_active_on_date(rec_weekend, d) is True
+        else:
+            assert is_recurrence_active_on_date(rec_weekend, d) is False
+
+    # 4. Empty and invalid inputs
+    for d in dates.values():
+        assert is_recurrence_active_on_date("weekdays:[]", d) is False
+        assert is_recurrence_active_on_date("weekdays:[   ]", d) is False
+        assert is_recurrence_active_on_date(None, d) is False
+        assert is_recurrence_active_on_date("", d) is False
+        assert is_recurrence_active_on_date("invalid", d) is False
+        assert is_recurrence_active_on_date("monthly", d) is False
+        assert is_recurrence_active_on_date("weekdays:[abc]", d) is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_recurring_tasks_for_date_custom_weekdays(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies ensure_recurring_tasks_for_date spawns tasks only on matching custom weekdays and is idempotent."""
+    user = await create_test_user(db_session, telegram_id=88801)
+    monday = date(2026, 11, 23)  # weekday 0
+    tuesday = date(2026, 11, 24)  # weekday 1 (matching)
+    wednesday = date(2026, 11, 25)  # weekday 2 (non-matching)
+    thursday = date(2026, 11, 26)  # weekday 3 (matching)
+
+    # Create past task on Monday with recurrence="weekdays:[1,3,6]"
+    task = await create_task(
+        db_session,
+        user_id=user.telegram_id,
+        data=TaskCreate(
+            title="Bi-weekly Sync",
+            target_date=monday,
+            priority=TaskPriority.high,
+            tag="work",
+            recurrence="weekdays:[1,3,6]",
+        ),
+    )
+    assert task.id is not None
+
+    # 1. Tuesday (weekday 1) matches -> should generate 1 task
+    spawned_tue = await ensure_recurring_tasks_for_date(db_session, user.telegram_id, tuesday)
+    assert len(spawned_tue) == 1
+    assert spawned_tue[0].title == "Bi-weekly Sync"
+    assert spawned_tue[0].target_date == tuesday
+    assert spawned_tue[0].status == TaskStatus.todo
+    assert spawned_tue[0].recurrence == "weekdays:[1,3,6]"
+
+    # 2. Idempotency on Tuesday: repeated call produces no duplicates
+    spawned_tue_repeat = await ensure_recurring_tasks_for_date(db_session, user.telegram_id, tuesday)
+    assert spawned_tue_repeat == []
+
+    # 3. Wednesday (weekday 2) does not match -> should generate 0 tasks
+    spawned_wed = await ensure_recurring_tasks_for_date(db_session, user.telegram_id, wednesday)
+    assert spawned_wed == []
+
+    # 4. Thursday (weekday 3) matches -> should generate 1 task
+    spawned_thu = await ensure_recurring_tasks_for_date(db_session, user.telegram_id, thursday)
+    assert len(spawned_thu) == 1
+    assert spawned_thu[0].title == "Bi-weekly Sync"
+    assert spawned_thu[0].target_date == thursday
+    assert spawned_thu[0].status == TaskStatus.todo

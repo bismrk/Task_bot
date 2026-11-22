@@ -331,3 +331,73 @@ async def test_checklist_tenant_isolation(api_context):
     assert data["title"] == "Confidential Task A"
     assert data["status"] == "todo"
     assert data["user_id"] == user_a_id
+
+
+@pytest.mark.asyncio
+async def test_custom_recurrence_api_lifecycle_and_validation(api_context):
+    """Verifies Issue #20: Custom recurrence API flow and validation.
+
+    Tests:
+    1. Validation rejects malformed/empty recurrence strings with 422.
+    2. Valid custom recurrence is normalized on POST /api/tasks.
+    3. Matching days auto-spawn recurring tasks via GET /api/tasks?date=...
+    4. Non-matching days do not spawn recurring tasks.
+    """
+    client, session_factory, settings = api_context
+    user_id = 99903
+    headers = get_auth_headers(user_id, settings.BOT_TOKEN)
+
+    monday_str = "2026-11-23"  # weekday 0
+    tuesday_str = "2026-11-24"  # weekday 1 (matching)
+    wednesday_str = "2026-11-25"  # weekday 2 (non-matching)
+    thursday_str = "2026-11-26"  # weekday 3 (matching)
+
+    # 1. Validation rejection: invalid digits (e.g. 7), empty day list, invalid strings
+    for bad_rec in ["weekdays:[7]", "weekdays:[]", "monthly", "invalid"]:
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "title": "Invalid Task",
+                "target_date": monday_str,
+                "recurrence": bad_rec,
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 422
+
+    # 2. Valid custom recurrence with normalization on creation
+    create_resp = client.post(
+        "/api/tasks",
+        json={
+            "title": "Custom Recurring Meeting",
+            "target_date": monday_str,
+            "priority": "high",
+            "recurrence": "weekdays:[6, 1, 3]",
+        },
+        headers=headers,
+    )
+    assert create_resp.status_code == 201
+    assert create_resp.json()["recurrence"] == "weekdays:[1,3,6]"
+
+    # 3. GET on Tuesday (weekday 1 - matches [1,3,6]) -> spawns task
+    tue_resp = client.get(f"/api/tasks?date={tuesday_str}", headers=headers)
+    assert tue_resp.status_code == 200
+    tue_tasks = tue_resp.json()
+    assert len(tue_tasks) == 1
+    assert tue_tasks[0]["title"] == "Custom Recurring Meeting"
+    assert tue_tasks[0]["target_date"] == tuesday_str
+    assert tue_tasks[0]["recurrence"] == "weekdays:[1,3,6]"
+    assert tue_tasks[0]["status"] == "todo"
+
+    # 4. GET on Wednesday (weekday 2 - non-matching) -> returns 0 tasks
+    wed_resp = client.get(f"/api/tasks?date={wednesday_str}", headers=headers)
+    assert wed_resp.status_code == 200
+    assert wed_resp.json() == []
+
+    # 5. GET on Thursday (weekday 3 - matches [1,3,6]) -> spawns task
+    thu_resp = client.get(f"/api/tasks?date={thursday_str}", headers=headers)
+    assert thu_resp.status_code == 200
+    thu_tasks = thu_resp.json()
+    assert len(thu_tasks) == 1
+    assert thu_tasks[0]["title"] == "Custom Recurring Meeting"
+    assert thu_tasks[0]["target_date"] == thursday_str

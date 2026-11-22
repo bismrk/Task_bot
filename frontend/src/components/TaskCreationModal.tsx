@@ -9,6 +9,18 @@ interface TaskCreationModalProps {
   targetDate?: string;
 }
 
+type RecurrenceMode = 'none' | 'daily' | 'weekdays' | 'custom';
+
+const WEEKDAY_PILLS = [
+  { label: 'Пн', day: 0 },
+  { label: 'Вт', day: 1 },
+  { label: 'Ср', day: 2 },
+  { label: 'Чт', day: 3 },
+  { label: 'Пт', day: 4 },
+  { label: 'Сб', day: 5 },
+  { label: 'Нд', day: 6 },
+];
+
 export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
   isOpen,
   onClose,
@@ -19,7 +31,8 @@ export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
   const [priority, setPriority] = useState<TaskPriority>('medium');
   const [tag, setTag] = useState('');
   const [deadlineTime, setDeadlineTime] = useState('');
-  const [recurrence, setRecurrence] = useState<string | null>(null);
+  const [recurrenceMode, setRecurrenceMode] = useState<RecurrenceMode>('none');
+  const [customDays, setCustomDays] = useState<number[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Reset form whenever modal opens
@@ -29,7 +42,8 @@ export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
       setPriority('medium');
       setTag('');
       setDeadlineTime('');
-      setRecurrence(null);
+      setRecurrenceMode('none');
+      setCustomDays([]);
       setIsSubmitting(false);
     }
   }, [isOpen]);
@@ -40,10 +54,40 @@ export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
 
   const effectiveDate = targetDate || new Date().toISOString().split('T')[0];
 
+  const triggerHaptic = (style: 'light' | 'medium' = 'light') => {
+    try {
+      window.Telegram?.WebApp?.HapticFeedback?.impactOccurred(style);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleCustomModeSelect = () => {
+    triggerHaptic('light');
+    setRecurrenceMode('custom');
+    if (customDays.length === 0) {
+      const [y, m, d] = effectiveDate.split('-').map(Number);
+      const dateObj = new Date(y, m - 1, d);
+      const defaultWeekday = (dateObj.getDay() + 6) % 7;
+      setCustomDays([defaultWeekday]);
+    }
+  };
+
+  const toggleDay = (day: number) => {
+    triggerHaptic('light');
+    setCustomDays((prev) => {
+      if (prev.includes(day)) {
+        return prev.filter((d) => d !== day);
+      }
+      return [...prev, day].sort((a, b) => a - b);
+    });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanTitle = title.trim();
     if (!cleanTitle || isSubmitting) return;
+    if (recurrenceMode === 'custom' && customDays.length === 0) return;
 
     setIsSubmitting(true);
     try {
@@ -57,13 +101,23 @@ export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
 
       const cleanTag = tag.trim().replace(/^#+/, '').slice(0, 50);
 
+      let recurrencePayload: string | null = null;
+      if (recurrenceMode === 'daily') {
+        recurrencePayload = 'daily';
+      } else if (recurrenceMode === 'weekdays') {
+        recurrencePayload = 'weekdays:[0,1,2,3,4]';
+      } else if (recurrenceMode === 'custom') {
+        const sorted = Array.from(new Set(customDays)).sort((a, b) => a - b);
+        recurrencePayload = `weekdays:[${sorted.join(',')}]`;
+      }
+
       const payload: TaskCreate = {
         title: cleanTitle.slice(0, 255),
         target_date: effectiveDate,
         priority,
         tag: cleanTag || null,
         deadline_at: deadlineAt,
-        recurrence: recurrence || null,
+        recurrence: recurrencePayload,
       };
 
       await onSubmit(payload);
@@ -72,6 +126,9 @@ export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
       setIsSubmitting(false);
     }
   };
+
+  const isCustomEmpty = recurrenceMode === 'custom' && customDays.length === 0;
+  const isSubmitDisabled = !title.trim() || isSubmitting || isCustomEmpty;
 
   return (
     <div
@@ -194,17 +251,20 @@ export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
           </div>
 
           {/* Recurrence Selector */}
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <label className="text-xs font-semibold text-muted uppercase tracking-wider flex items-center gap-1">
               <Repeat className="w-3.5 h-3.5 text-primary" />
               <span>Повторення</span>
             </label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               <button
                 type="button"
-                onClick={() => setRecurrence(null)}
+                onClick={() => {
+                  triggerHaptic('light');
+                  setRecurrenceMode('none');
+                }}
                 className={`py-2 px-2.5 rounded-xl text-xs font-medium border text-center transition-all ${
-                  recurrence === null
+                  recurrenceMode === 'none'
                     ? 'bg-primary/15 text-primary border-primary/40 font-semibold shadow-xs'
                     : 'bg-secondary text-muted border-transparent hover:border-black/10 dark:hover:border-white/10'
                 }`}
@@ -213,9 +273,12 @@ export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => setRecurrence('daily')}
+                onClick={() => {
+                  triggerHaptic('light');
+                  setRecurrenceMode('daily');
+                }}
                 className={`py-2 px-2.5 rounded-xl text-xs font-medium border text-center transition-all ${
-                  recurrence === 'daily'
+                  recurrenceMode === 'daily'
                     ? 'bg-primary/15 text-primary border-primary/40 font-semibold shadow-xs'
                     : 'bg-secondary text-muted border-transparent hover:border-black/10 dark:hover:border-white/10'
                 }`}
@@ -224,16 +287,60 @@ export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => setRecurrence('weekdays:[0,1,2,3,4]')}
+                onClick={() => {
+                  triggerHaptic('light');
+                  setRecurrenceMode('weekdays');
+                }}
                 className={`py-2 px-2.5 rounded-xl text-xs font-medium border text-center transition-all ${
-                  recurrence === 'weekdays:[0,1,2,3,4]'
+                  recurrenceMode === 'weekdays'
                     ? 'bg-primary/15 text-primary border-primary/40 font-semibold shadow-xs'
                     : 'bg-secondary text-muted border-transparent hover:border-black/10 dark:hover:border-white/10'
                 }`}
               >
                 🔁 Будні
               </button>
+              <button
+                type="button"
+                onClick={handleCustomModeSelect}
+                className={`py-2 px-2.5 rounded-xl text-xs font-medium border text-center transition-all ${
+                  recurrenceMode === 'custom'
+                    ? 'bg-primary/15 text-primary border-primary/40 font-semibold shadow-xs'
+                    : 'bg-secondary text-muted border-transparent hover:border-black/10 dark:hover:border-white/10'
+                }`}
+              >
+                📅 Вибрати дні
+              </button>
             </div>
+
+            {/* Custom Day Pills sub-row */}
+            {recurrenceMode === 'custom' && (
+              <div className="pt-1 space-y-1.5 animate-in fade-in duration-150">
+                <div className="grid grid-cols-7 gap-1.5">
+                  {WEEKDAY_PILLS.map(({ label, day }) => {
+                    const isSelected = customDays.includes(day);
+                    return (
+                      <button
+                        key={day}
+                        type="button"
+                        onClick={() => toggleDay(day)}
+                        className={`py-2 rounded-xl text-xs font-semibold text-center transition-all cursor-pointer ${
+                          isSelected
+                            ? 'bg-primary text-primary-foreground shadow-xs'
+                            : 'bg-secondary text-muted hover:text-foreground border border-transparent'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {isCustomEmpty && (
+                  <p className="text-xs text-amber-500 font-medium">
+                    Оберіть хоча б один день
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Actions */}
@@ -248,7 +355,7 @@ export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={!title.trim() || isSubmitting}
+              disabled={isSubmitDisabled}
               className="flex-1 py-3 px-4 rounded-xl bg-primary text-primary-foreground font-semibold text-sm transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed text-center shadow-lg shadow-primary/20"
             >
               {isSubmitting ? 'Збереження...' : 'Створити'}

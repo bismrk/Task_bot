@@ -8,6 +8,45 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from src.models.task import TaskPriority, TaskStatus
 
 
+def validate_recurrence_rule(v: Any) -> str | None:
+    """Validate and normalize recurrence rule string.
+
+    Accepts None, 'daily', 'weekdays', or 'weekdays:[<digits>]' with digits in range 0..6.
+    Normalizes custom weekdays into unique sorted ascending list.
+    Rejects empty list, invalid digits, or unknown formats with ValueError.
+    """
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise ValueError("Recurrence must be a string or None")
+    val = v.strip()
+    if not val:
+        raise ValueError("Recurrence cannot be empty")
+    val_lower = val.lower()
+    if val_lower == "daily":
+        return "daily"
+    if val_lower == "weekdays":
+        return "weekdays"
+    if val_lower.startswith("weekdays:[") and val_lower.endswith("]"):
+        inner = val[len("weekdays:[") : -1].strip()
+        if not inner:
+            raise ValueError("Recurrence weekdays list cannot be empty")
+        parts = inner.split(",")
+        days: set[int] = set()
+        for part in parts:
+            p = part.strip()
+            if not p or not p.isdigit():
+                raise ValueError(f"Invalid weekday index: {p}")
+            day = int(p)
+            if day < 0 or day > 6:
+                raise ValueError(f"Weekday index out of range (0..6): {day}")
+            days.add(day)
+        if not days:
+            raise ValueError("Recurrence weekdays list cannot be empty")
+        return f"weekdays:[{','.join(str(d) for d in sorted(days))}]"
+    raise ValueError(f"Invalid recurrence format: '{v}'")
+
+
 class ExtractedTask(BaseModel):
     """Structured representation of an extracted task from text or voice."""
 
@@ -90,6 +129,12 @@ class TaskCreate(BaseModel):
     tag: str | None = Field(default=None, max_length=50)
     recurrence: str | None = None
 
+    @field_validator("recurrence", mode="before")
+    @classmethod
+    def validate_recurrence(cls, v: Any) -> str | None:
+        """Validate and normalize recurrence rule."""
+        return validate_recurrence_rule(v)
+
     @field_validator("title", mode="before")
     @classmethod
     def validate_title(cls, v: Any) -> str:
@@ -157,6 +202,12 @@ class TaskUpdate(BaseModel):
     tag: str | None = None
     status: TaskStatus | None = None
     recurrence: str | None = None
+
+    @field_validator("recurrence", mode="before")
+    @classmethod
+    def validate_recurrence(cls, v: Any) -> str | None:
+        """Validate and normalize recurrence rule if provided."""
+        return validate_recurrence_rule(v)
 
     @field_validator("title", mode="before")
     @classmethod

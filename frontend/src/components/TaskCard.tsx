@@ -69,13 +69,62 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task, onToggle, onDelete }) 
 
   const formatRecurrence = (rec: string | null): string | null => {
     if (!rec) return null;
-    const lower = rec.trim().toLowerCase();
-    if (lower === 'daily') {
+    const clean = rec.trim().toLowerCase();
+    if (!clean) return null;
+
+    if (clean === 'daily' || clean === 'weekdays:[0,1,2,3,4,5,6]') {
       return '🔁 Щодня';
     }
-    if (lower === 'weekdays:[0,1,2,3,4]' || lower === 'weekdays') {
+    if (clean === 'weekdays' || clean === 'weekdays:[0,1,2,3,4]') {
       return '🔁 Будні';
     }
+    if (clean === 'weekdays:[5,6]') {
+      return '🔁 Вихідні';
+    }
+
+    const match = clean.match(/^weekdays:\[([0-9,\s]*)\]$/);
+    if (match) {
+      const parts = match[1]
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0 && !isNaN(Number(s)))
+        .map(Number);
+
+      if (parts.length === 0) return null;
+
+      const uniqueDays = Array.from(new Set(parts)).sort((a, b) => a - b);
+      const key = uniqueDays.join(',');
+
+      if (key === '0,1,2,3,4,5,6') {
+        return '🔁 Щодня';
+      }
+      if (key === '0,1,2,3,4') {
+        return '🔁 Будні';
+      }
+      if (key === '5,6') {
+        return '🔁 Вихідні';
+      }
+
+      const DAY_NAMES: Record<number, string> = {
+        0: 'Пн',
+        1: 'Вт',
+        2: 'Ср',
+        3: 'Чт',
+        4: 'Пт',
+        5: 'Сб',
+        6: 'Нд',
+      };
+
+      const formattedDays = uniqueDays
+        .map((d) => DAY_NAMES[d])
+        .filter(Boolean)
+        .join(', ');
+
+      if (formattedDays) {
+        return `🔁 ${formattedDays}`;
+      }
+    }
+
     return `🔁 ${rec}`;
   };
 

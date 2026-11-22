@@ -359,19 +359,36 @@ def is_recurrence_active_on_date(recurrence: str | None, target_date: date) -> b
     if not recurrence:
         return False
     rec = recurrence.strip().lower()
+    if not rec:
+        return False
     if rec == "daily":
         return True
-    if rec.startswith("weekdays:"):
-        match = re.search(r"weekdays:\[([0-9,\s]*)\]", rec)
-        if match:
-            day_strs = match.group(1).split(",")
-            days = [int(s.strip()) for s in day_strs if s.strip().isdigit()]
-            return target_date.weekday() in days
-        days = [int(s.strip()) for s in rec.replace("weekdays:", "").split(",") if s.strip().isdigit()]
-        if days:
-            return target_date.weekday() in days
     if rec == "weekdays":
         return target_date.weekday() in (0, 1, 2, 3, 4)
+    if rec.startswith("weekdays:"):
+        match = re.fullmatch(r"weekdays:\[([0-9,\s]*)\]", rec)
+        if match:
+            inner = match.group(1).strip()
+            if not inner:
+                return False
+            day_strs = inner.split(",")
+            days: list[int] = []
+            for s in day_strs:
+                s_trimmed = s.strip()
+                if not s_trimmed.isdigit():
+                    return False
+                days.append(int(s_trimmed))
+            return target_date.weekday() in days
+        match_unbracketed = re.fullmatch(r"weekdays:([0-9,\s]+)", rec)
+        if match_unbracketed:
+            day_strs = match_unbracketed.group(1).split(",")
+            days = []
+            for s in day_strs:
+                s_trimmed = s.strip()
+                if not s_trimmed.isdigit():
+                    return False
+                days.append(int(s_trimmed))
+            return target_date.weekday() in days
     return False
 
 
