@@ -1,5 +1,6 @@
 """Application configuration settings."""
 
+import os
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -26,4 +27,9 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """Provide a cached Settings instance."""
-    return Settings()
+    settings = Settings()
+    if settings.GEMINI_API_KEY and not os.environ.get("GEMINI_API_KEY"):
+        os.environ["GEMINI_API_KEY"] = settings.GEMINI_API_KEY
+    if settings.BOT_TOKEN and not os.environ.get("BOT_TOKEN"):
+        os.environ["BOT_TOKEN"] = settings.BOT_TOKEN
+    return settings

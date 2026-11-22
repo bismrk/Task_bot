@@ -518,8 +518,8 @@ async def test_parse_tasks_client_initialization_failure_returns_empty_list(
 
 @pytest.mark.asyncio
 async def test_parse_tasks_default_model_used() -> None:
-    """Verifies REQ-AI-02: parse_tasks uses gemini-2.5-flash as DEFAULT_MODEL."""
-    assert DEFAULT_MODEL == "gemini-2.5-flash"
+    """Verifies REQ-AI-02: parse_tasks uses gemini-3.5-flash as DEFAULT_MODEL."""
+    assert DEFAULT_MODEL == "gemini-3.5-flash"
     mock_client = AsyncMock()
     mock_client.models.generate_content.return_value = AsyncMock(
         parsed=TaskExtractionResult(tasks=[])
@@ -528,6 +528,6 @@ async def test_parse_tasks_default_model_used() -> None:
     await parse_tasks_from_text("тест", client=mock_client)
 
     call_kwargs = mock_client.models.generate_content.call_args.kwargs
-    assert call_kwargs["model"] == "gemini-2.5-flash"
+    assert call_kwargs["model"] == "gemini-3.5-flash"
     assert call_kwargs["config"].response_mime_type == "application/json"
     assert call_kwargs["config"].response_schema == TaskExtractionResult

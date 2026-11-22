@@ -15,7 +15,8 @@ from src.schemas.task import ExtractedTask, TaskExtractionResult
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL: str = "gemini-2.5-flash"
+DEFAULT_MODEL: str = "gemini-3.5-flash"
+FALLBACK_MODEL: str = "gemini-3.5-flash-lite"
 
 
 def _get_user_timezone(user_timezone: str) -> ZoneInfo:
@@ -164,16 +165,36 @@ async def parse_tasks(
         response_schema=TaskExtractionResult,
     )
 
-    # Invoke Gemini generation with graceful exception handling
-    try:
-        response = await _execute_generate_content(
-            client=client,
-            model=DEFAULT_MODEL,
-            contents=contents,
-            config=config,
-        )
-    except Exception as e:
-        logger.error("Error during Gemini API call: %s", e)
+    # Invoke Gemini generation with graceful exception handling and fallback model
+    candidate_models = (
+        [DEFAULT_MODEL, FALLBACK_MODEL]
+        if DEFAULT_MODEL != FALLBACK_MODEL
+        else [DEFAULT_MODEL]
+    )
+    response = None
+    last_error: Exception | None = None
+
+    for model_name in candidate_models:
+        try:
+            response = await _execute_generate_content(
+                client=client,
+                model=model_name,
+                contents=contents,
+                config=config,
+            )
+            if response is not None:
+                break
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                "Gemini API call with model %s failed: %s; trying fallback model...",
+                model_name,
+                e,
+            )
+
+    if response is None:
+        if last_error is not None:
+            logger.error("All Gemini API candidate models failed. Last error: %s", last_error)
         return []
 
     # Parse result into TaskExtractionResult

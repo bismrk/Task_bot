@@ -53,14 +53,27 @@ export function getInitData(): string {
     }
   }
 
-  // 2. Try environment variable fallback for local browser development
+  // 2. Try URL search parameter (e.g. ?initData=... or ?user_id=...)
+  if (typeof window !== 'undefined') {
+    const urlParams = new URLSearchParams(window.location.search);
+    const tgInitData = urlParams.get('tgWebAppData') || urlParams.get('initData');
+    if (tgInitData && tgInitData.trim().length > 0) {
+      return tgInitData.trim();
+    }
+    const customUserId = urlParams.get('user_id') || localStorage.getItem('dev_user_id') || '1396728720';
+    const authDate = Math.floor(Date.now() / 1000);
+    return `query_id=mock_query_id&user=%7B%22id%22%3A${customUserId}%2C%22first_name%22%3A%22DevUser%22%2C%22username%22%3A%22devuser%22%7D&auth_date=${authDate}&hash=mock_dev_hash`;
+  }
+
+  // 3. Try environment variable fallback for local browser development
   const envInitData = import.meta.env.VITE_DEV_INIT_DATA as string | undefined;
   if (envInitData && envInitData.trim().length > 0) {
     return envInitData.trim();
   }
 
-  // 3. Fallback mock credentials for browser development outside Telegram
-  return 'query_id=mock_query_id&user=%7B%22id%22%3A123456789%2C%22first_name%22%3A%22DevUser%22%2C%22username%22%3A%22devuser%22%7D&auth_date=1700000000&hash=mock_dev_hash';
+  // 4. Fallback mock credentials for browser development outside Telegram
+  const authDate = Math.floor(Date.now() / 1000);
+  return `query_id=mock_query_id&user=%7B%22id%22%3A1396728720%2C%22first_name%22%3A%22DevUser%22%2C%22username%22%3A%22devuser%22%7D&auth_date=${authDate}&hash=mock_dev_hash`;
 }
 
 /**

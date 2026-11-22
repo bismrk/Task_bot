@@ -20,6 +20,7 @@ def validate_init_data(
     raw_init_data: str,
     bot_token: str,
     max_age_seconds: int = 86400,
+    allow_dev_mock: bool = False,
 ) -> dict[str, Any]:
     """Validate Telegram WebApp initData query string per official Telegram specification.
 
@@ -31,6 +32,7 @@ def validate_init_data(
         raw_init_data: Raw URL-encoded initData string received from WebApp client.
         bot_token: Telegram bot token secret.
         max_age_seconds: Maximum allowed age for auth_date (defaults to 86400s / 24h).
+        allow_dev_mock: Whether to accept development mock signatures outside Telegram.
 
     Returns:
         Dictionary of validated parameters with 'user' parsed as a Python dict.
@@ -46,6 +48,22 @@ def validate_init_data(
 
     parsed_pairs = urllib.parse.parse_qsl(raw_init_data, keep_blank_values=True)
     parsed_dict: dict[str, str] = dict(parsed_pairs)
+
+    # Allow mock developer authentication in local browser testing outside Telegram
+    if allow_dev_mock and parsed_dict.get("hash") == "mock_dev_hash":
+        user_raw = parsed_dict.get("user")
+        if user_raw:
+            try:
+                user_obj = json.loads(user_raw)
+                if not isinstance(user_obj, dict) or "id" not in user_obj:
+                    user_obj = {"id": 1396728720, "first_name": "DevUser"}
+            except Exception:
+                user_obj = {"id": 1396728720, "first_name": "DevUser"}
+        else:
+            user_obj = {"id": 1396728720, "first_name": "DevUser"}
+        result_data: dict[str, Any] = dict(parsed_dict)
+        result_data["user"] = user_obj
+        return result_data
 
     if "hash" not in parsed_dict:
         raise HTTPException(
@@ -173,7 +191,15 @@ def get_current_user_id(
     if not bot_token and settings is not None:
         bot_token = getattr(settings, "BOT_TOKEN", "")
 
-    parsed_data = validate_init_data(raw_init_data=raw_init_data, bot_token=bot_token)
+    is_debug = getattr(settings, "DEBUG", False) if settings is not None else False
+    if not is_debug and app_settings is not None:
+        is_debug = getattr(app_settings, "DEBUG", False)
+
+    parsed_data = validate_init_data(
+        raw_init_data=raw_init_data,
+        bot_token=bot_token,
+        allow_dev_mock=is_debug,
+    )
     return int(parsed_data["user"]["id"])
 
 

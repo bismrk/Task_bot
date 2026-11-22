@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import logging
+import os
 import signal
 import sys
 from typing import Final
@@ -67,6 +68,11 @@ async def setup_application(
     if not resolved_settings.BOT_TOKEN or not resolved_settings.BOT_TOKEN.strip():
         logger.error("BOT_TOKEN is not configured in settings or environment.")
         raise ValueError("BOT_TOKEN is not configured")
+
+    if resolved_settings.GEMINI_API_KEY and not os.environ.get("GEMINI_API_KEY"):
+        os.environ["GEMINI_API_KEY"] = resolved_settings.GEMINI_API_KEY
+    if resolved_settings.BOT_TOKEN and not os.environ.get("BOT_TOKEN"):
+        os.environ["BOT_TOKEN"] = resolved_settings.BOT_TOKEN
 
     if not resolved_settings.WEBAPP_URL:
         fallback_url = f"http://{resolved_settings.HOST}:{resolved_settings.PORT}"
