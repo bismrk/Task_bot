@@ -462,3 +462,155 @@ async def test_init_db_migrates_last_evening_summary_date_idempotently(tmp_path)
         ]
 
     await legacy_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_task_custom_reminder_at_default_and_persistence(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #27: Task.custom_reminder_at defaults to None, persists timestamps, and clears to NULL."""
+    user = User(telegram_id=700027)
+    db_session.add(user)
+    await db_session.commit()
+
+    task = Task(
+        user_id=700027,
+        title="Repeat reminder test",
+        target_date=date(2026, 11, 23),
+    )
+    db_session.add(task)
+    await db_session.commit()
+    await db_session.refresh(task)
+    assert task.custom_reminder_at is None
+
+    remind_dt = datetime(2026, 11, 23, 15, 30, 0, tzinfo=timezone.utc)
+    task.custom_reminder_at = remind_dt
+    await db_session.commit()
+    await db_session.refresh(task)
+    assert task.custom_reminder_at is not None
+    assert (
+        task.custom_reminder_at == remind_dt
+        or task.custom_reminder_at.replace(tzinfo=timezone.utc) == remind_dt
+    )
+
+    task.custom_reminder_at = None
+    await db_session.commit()
+    await db_session.refresh(task)
+    assert task.custom_reminder_at is None
+
+
+@pytest.mark.asyncio
+async def test_init_db_migrates_legacy_tasks_custom_reminder_at_idempotently(tmp_path) -> None:
+    """Verifies Issue #27: init_db safely adds tasks.custom_reminder_at, preserves rows, and is idempotent."""
+    db_file = tmp_path / "legacy_tasks.db"
+    legacy_engine = create_db_engine(f"sqlite+aiosqlite:///{db_file}")
+
+    async with legacy_engine.begin() as conn:
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE users (
+                    telegram_id BIGINT PRIMARY KEY NOT NULL,
+                    timezone VARCHAR NOT NULL DEFAULT 'Europe/Kyiv',
+                    created_at DATETIME NOT NULL,
+                    last_midnight_review_date DATE,
+                    last_morning_push_date DATE,
+                    reminder_interval_hours INTEGER DEFAULT 4,
+                    last_periodic_reminder_at DATETIME,
+                    last_evening_summary_date DATE
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+                    title VARCHAR(255) NOT NULL,
+                    status VARCHAR(8) NOT NULL,
+                    priority VARCHAR(6) NOT NULL,
+                    tag VARCHAR(50),
+                    target_date DATE NOT NULL,
+                    deadline_at DATETIME,
+                    recurrence VARCHAR,
+                    reminder_sent_1h BOOLEAN NOT NULL,
+                    reminder_sent_10m BOOLEAN NOT NULL,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                INSERT INTO users (telegram_id, timezone, created_at)
+                VALUES (820001, 'Europe/Berlin', '2026-11-01 08:00:00')
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                INSERT INTO tasks (
+                    user_id, title, status, priority, tag, target_date, deadline_at,
+                    recurrence, reminder_sent_1h, reminder_sent_10m, created_at
+                )
+                VALUES
+                    (820001, 'Привітати Таню', 'todo', 'high', 'особисте', '2026-11-23', '2026-11-23 15:15:00', NULL, 0, 0, '2026-11-23 09:00:00'),
+                    (820001, 'Звіт', 'done', 'medium', 'робота', '2026-11-23', NULL, 'daily', 1, 1, '2026-11-23 10:00:00')
+                """
+            )
+        )
+
+    # First migration run
+    await init_db(engine=legacy_engine)
+
+    async with legacy_engine.connect() as conn:
+        cols = {
+            row[1]
+            for row in (await conn.execute(text("PRAGMA table_info(tasks)"))).fetchall()
+        }
+        assert "custom_reminder_at" in cols
+
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT title, status, deadline_at, custom_reminder_at "
+                    "FROM tasks ORDER BY id"
+                )
+            )
+        ).fetchall()
+        assert rows == [
+            ("Привітати Таню", "todo", "2026-11-23 15:15:00", None),
+            ("Звіт", "done", None, None),
+        ]
+
+    # Persist a custom_reminder_at value and re-run init_db repeatedly
+    async with legacy_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE tasks SET custom_reminder_at = '2026-11-23 15:30:00' "
+                "WHERE title = 'Привітати Таню'"
+            )
+        )
+
+    await init_db(engine=legacy_engine)
+    await init_db(engine=legacy_engine)
+
+    async with legacy_engine.connect() as conn:
+        rows_after = (
+            await conn.execute(
+                text(
+                    "SELECT title, deadline_at, custom_reminder_at "
+                    "FROM tasks ORDER BY id"
+                )
+            )
+        ).fetchall()
+        assert rows_after == [
+            ("Привітати Таню", "2026-11-23 15:15:00", "2026-11-23 15:30:00"),
+            ("Звіт", None, None),
+        ]
+
+    await legacy_engine.dispose()

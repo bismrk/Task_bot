@@ -6,9 +6,25 @@ interface TaskCardProps {
   task: TaskRead;
   onToggle: (taskId: number) => void;
   onDelete: (taskId: number) => void;
+  userTimezone?: string;
 }
 
-export const TaskCard: React.FC<TaskCardProps> = ({ task, onToggle, onDelete }) => {
+function parseUtcDate(isoString: string | null): Date | null {
+  if (!isoString) return null;
+  const trimmed = isoString.trim();
+  if (!trimmed) return null;
+  const hasTimezone = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(trimmed);
+  const normalized = hasTimezone ? trimmed : `${trimmed}Z`;
+  const d = new Date(normalized);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+export const TaskCard: React.FC<TaskCardProps> = ({
+  task,
+  onToggle,
+  onDelete,
+  userTimezone,
+}) => {
   const isDone = task.status === 'done';
   const isActive = task.status === 'todo';
   const isInactive = task.status === 'done' || task.status === 'canceled';
@@ -59,12 +75,27 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task, onToggle, onDelete }) 
     }
   };
 
-  const formatDeadline = (isoString: string | null): string | null => {
-    if (!isoString) return null;
+  const formatDeadline = (d: Date | null): string | null => {
+    if (!d) return null;
+    const tz = userTimezone?.trim();
+    if (tz) {
+      try {
+        return new Intl.DateTimeFormat('uk-UA', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+          timeZone: tz,
+        }).format(d);
+      } catch {
+        // Invalid IANA timezone string: fall back safely to browser local timezone
+      }
+    }
     try {
-      const d = new Date(isoString);
-      if (isNaN(d.getTime())) return null;
-      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      return new Intl.DateTimeFormat('uk-UA', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(d);
     } catch {
       return null;
     }
@@ -131,10 +162,11 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task, onToggle, onDelete }) 
     return `🔁 ${rec}`;
   };
 
-  const formattedDeadline = formatDeadline(task.deadline_at);
+  const parsedDeadline = parseUtcDate(task.deadline_at);
+  const formattedDeadline = formatDeadline(parsedDeadline);
   const formattedRecurrence = formatRecurrence(task.recurrence);
 
-  const deadlineMs = task.deadline_at ? new Date(task.deadline_at).getTime() : NaN;
+  const deadlineMs = parsedDeadline ? parsedDeadline.getTime() : NaN;
   const hasValidDeadline = formattedDeadline !== null && !isNaN(deadlineMs);
   const remainingMs = hasValidDeadline ? deadlineMs - Date.now() : null;
   const isUrgentTimed = isActive && remainingMs !== null && remainingMs <= 60 * 60 * 1000;

@@ -9,6 +9,7 @@ interface TodayChecklistProps {
   initialTasks: TaskRead[];
   onTasksChanged?: (tasks: TaskRead[]) => void;
   targetDate?: string;
+  userTimezone?: string;
 }
 
 const PRIORITY_ORDER: Record<TaskPriority, number> = {
@@ -21,6 +22,7 @@ export const TodayChecklist: React.FC<TodayChecklistProps> = ({
   initialTasks,
   onTasksChanged,
   targetDate,
+  userTimezone,
 }) => {
   const [tasks, setTasks] = useState<TaskRead[]>(initialTasks);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -168,6 +170,7 @@ export const TodayChecklist: React.FC<TodayChecklistProps> = ({
               task={task}
               onToggle={handleToggle}
               onDelete={handleDelete}
+              userTimezone={userTimezone}
             />
           ))}
         </div>
@@ -191,6 +194,7 @@ export const TodayChecklist: React.FC<TodayChecklistProps> = ({
         onClose={() => setIsModalOpen(false)}
         onSubmit={handleCreateTask}
         targetDate={targetDate}
+        userTimezone={userTimezone}
       />
     </div>
   );

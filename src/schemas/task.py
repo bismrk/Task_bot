@@ -1,6 +1,6 @@
 """Pydantic schemas for task extraction, creation, update, and reading."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -107,9 +107,11 @@ class ExtractedTask(BaseModel):
     @field_validator("deadline_at", mode="after")
     @classmethod
     def check_deadline_at_timezone(cls, v: datetime | None) -> datetime | None:
-        """Ensure deadline_at is timezone-aware if present."""
+        """Ensure deadline_at is timezone-aware if present and normalized to UTC."""
         if v is not None and v.tzinfo is None:
             raise ValueError("deadline_at must be timezone-aware")
+        if v is not None:
+            return v.astimezone(timezone.utc)
         return v
 
 
@@ -186,9 +188,11 @@ class TaskCreate(BaseModel):
     @field_validator("deadline_at", mode="after")
     @classmethod
     def check_deadline_at_timezone(cls, v: datetime | None) -> datetime | None:
-        """Ensure deadline_at is timezone-aware if present."""
+        """Ensure deadline_at is timezone-aware if present and normalized to UTC."""
         if v is not None and v.tzinfo is None:
             raise ValueError("deadline_at must be timezone-aware")
+        if v is not None:
+            return v.astimezone(timezone.utc)
         return v
 
 
@@ -286,9 +290,11 @@ class TaskUpdate(BaseModel):
     @field_validator("deadline_at", mode="after")
     @classmethod
     def check_deadline_at_timezone(cls, v: datetime | None) -> datetime | None:
-        """Ensure deadline_at is timezone-aware if present."""
+        """Ensure deadline_at is timezone-aware if present and normalized to UTC."""
         if v is not None and v.tzinfo is None:
             raise ValueError("deadline_at must be timezone-aware")
+        if v is not None:
+            return v.astimezone(timezone.utc)
         return v
 
 
@@ -307,6 +313,16 @@ class TaskRead(BaseModel):
     reminder_sent_1h: bool
     reminder_sent_10m: bool
     created_at: datetime
+
+    @field_validator("deadline_at", "created_at", mode="after")
+    @classmethod
+    def normalize_utc_datetimes(cls, v: datetime | None) -> datetime | None:
+        """Normalize naive or non-UTC datetimes to timezone-aware UTC."""
+        if v is None:
+            return None
+        if v.tzinfo is None or v.tzinfo.utcoffset(v) is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc)
 
     model_config = ConfigDict(from_attributes=True)
 

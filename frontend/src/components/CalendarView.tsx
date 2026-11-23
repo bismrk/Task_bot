@@ -62,7 +62,11 @@ function formatUkrainianDate(dateStr: string): string {
   return `${day} ${monthName} ${year}`;
 }
 
-export const CalendarView: React.FC = () => {
+interface CalendarViewProps {
+  userTimezone?: string;
+}
+
+export const CalendarView: React.FC<CalendarViewProps> = ({ userTimezone }) => {
   const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
   const [currentYear, setCurrentYear] = useState<number>(() => new Date().getFullYear());
   const [currentMonth, setCurrentMonth] = useState<number>(() => new Date().getMonth() + 1);
@@ -510,6 +514,7 @@ export const CalendarView: React.FC = () => {
                 task={task}
                 onToggle={handleToggle}
                 onDelete={handleDelete}
+                userTimezone={userTimezone}
               />
             ))}
           </div>
@@ -534,6 +539,7 @@ export const CalendarView: React.FC = () => {
         onClose={() => setIsModalOpen(false)}
         onSubmit={handleCreateTask}
         targetDate={selectedDate}
+        userTimezone={userTimezone}
       />
     </div>
   );

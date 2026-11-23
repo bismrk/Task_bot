@@ -160,11 +160,12 @@ export default function App() {
               <TodayChecklist
                 initialTasks={tasks}
                 onTasksChanged={(updated) => setTasks(updated)}
+                userTimezone={user?.timezone}
               />
             )}
 
             {/* Calendar View */}
-            {activeTab === 'calendar' && <CalendarView />}
+            {activeTab === 'calendar' && <CalendarView userTimezone={user?.timezone} />}
 
             {/* Analytics View */}
             {activeTab === 'analytics' && <AnalyticsView />}

@@ -840,3 +840,236 @@ async def test_task_endpoints_require_authentication(api_context, method, endpoi
         headers={"Authorization": f"tma {expired_init_data}"},
     )
     assert res_expired.status_code == 401
+
+
+def _assert_explicit_utc_iso(value: str) -> datetime:
+    """Assert ISO-8601 string carries an explicit UTC designator ('Z' or '+00:00')."""
+    assert isinstance(value, str)
+    assert value.endswith("Z") or value.endswith("+00:00"), (
+        f"Expected explicit UTC designator ('Z' or '+00:00'), got {value!r}"
+    )
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+    return parsed
+
+
+def test_task_read_and_user_read_normalize_naive_and_non_utc_datetimes() -> None:
+    """Verifies Issue #27: TaskRead and UserRead normalize naive and non-UTC datetimes to UTC with explicit JSON designator."""
+    from zoneinfo import ZoneInfo
+
+    from src.schemas.task import TaskRead
+    from src.schemas.user import UserRead
+
+    # 1. Naive datetimes (as returned by SQLite) get timezone.utc attached
+    naive_deadline = datetime(2026, 11, 23, 15, 15, 0)
+    naive_created = datetime(2026, 11, 23, 10, 0, 0)
+    task_read_naive = TaskRead(
+        id=1,
+        user_id=100,
+        title="Привітати Таню",
+        status=TaskStatus.todo,
+        priority=TaskPriority.high,
+        target_date=date(2026, 11, 23),
+        deadline_at=naive_deadline,
+        reminder_sent_1h=False,
+        reminder_sent_10m=False,
+        created_at=naive_created,
+    )
+    assert task_read_naive.deadline_at == datetime(2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc)
+    assert task_read_naive.created_at == datetime(2026, 11, 23, 10, 0, 0, tzinfo=timezone.utc)
+    dumped_naive = task_read_naive.model_dump(mode="json")
+    assert _assert_explicit_utc_iso(dumped_naive["deadline_at"]) == datetime(
+        2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc
+    )
+    assert _assert_explicit_utc_iso(dumped_naive["created_at"]) == datetime(
+        2026, 11, 23, 10, 0, 0, tzinfo=timezone.utc
+    )
+
+    # 2. Non-UTC aware datetimes are converted via .astimezone(timezone.utc)
+    kyiv_tz = ZoneInfo("Europe/Kyiv")
+    aware_deadline_kyiv = datetime(2026, 11, 23, 17, 15, 0, tzinfo=kyiv_tz)  # 15:15 UTC
+    aware_created_kyiv = datetime(2026, 11, 23, 12, 0, 0, tzinfo=kyiv_tz)    # 10:00 UTC
+    task_read_aware = TaskRead(
+        id=2,
+        user_id=100,
+        title="Aware Task",
+        status=TaskStatus.todo,
+        priority=TaskPriority.medium,
+        target_date=date(2026, 11, 23),
+        deadline_at=aware_deadline_kyiv,
+        reminder_sent_1h=False,
+        reminder_sent_10m=False,
+        created_at=aware_created_kyiv,
+    )
+    assert task_read_aware.deadline_at == datetime(2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc)
+    assert task_read_aware.created_at == datetime(2026, 11, 23, 10, 0, 0, tzinfo=timezone.utc)
+    dumped_aware = task_read_aware.model_dump(mode="json")
+    assert _assert_explicit_utc_iso(dumped_aware["deadline_at"]) == datetime(
+        2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc
+    )
+
+    # 3. UserRead normalizes both naive and non-UTC aware created_at
+    user_naive = UserRead(telegram_id=1, timezone="Europe/Berlin", created_at=naive_created)
+    assert user_naive.created_at == datetime(2026, 11, 23, 10, 0, 0, tzinfo=timezone.utc)
+    assert _assert_explicit_utc_iso(user_naive.model_dump(mode="json")["created_at"]) == datetime(
+        2026, 11, 23, 10, 0, 0, tzinfo=timezone.utc
+    )
+
+    user_aware = UserRead(telegram_id=2, timezone="Europe/Kyiv", created_at=aware_created_kyiv)
+    assert user_aware.created_at == datetime(2026, 11, 23, 10, 0, 0, tzinfo=timezone.utc)
+    assert _assert_explicit_utc_iso(user_aware.model_dump(mode="json")["created_at"]) == datetime(
+        2026, 11, 23, 10, 0, 0, tzinfo=timezone.utc
+    )
+
+
+@pytest.mark.asyncio
+async def test_all_task_and_user_api_endpoints_emit_explicit_utc_designators(api_context) -> None:
+    """Verifies Issue #27: All TaskRead and UserRead endpoints serialize timestamps with explicit UTC ('Z' or '+00:00')."""
+    client, _session_factory, settings = api_context
+    user_id = 10027
+    headers = get_auth_headers(user_id, settings.BOT_TOKEN)
+
+    # 1. POST /api/tasks (with non-UTC offset +02:00 -> must serialize as explicit UTC 15:15:00Z)
+    post_res = client.post(
+        "/api/tasks",
+        headers=headers,
+        json={
+            "title": "Привітати Таню",
+            "target_date": "2026-11-23",
+            "deadline_at": "2026-11-23T17:15:00+02:00",
+            "priority": "high",
+        },
+    )
+    assert post_res.status_code == 201
+    post_data = post_res.json()
+    task_id = post_data["id"]
+    assert _assert_explicit_utc_iso(post_data["deadline_at"]) == datetime(
+        2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc
+    )
+    _assert_explicit_utc_iso(post_data["created_at"])
+
+    # 2. GET /api/tasks?date=... (reads back from SQLite where DateTime is naive)
+    list_res = client.get("/api/tasks?date=2026-11-23", headers=headers)
+    assert list_res.status_code == 200
+    list_data = list_res.json()
+    assert len(list_data) == 1
+    assert _assert_explicit_utc_iso(list_data[0]["deadline_at"]) == datetime(
+        2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc
+    )
+    _assert_explicit_utc_iso(list_data[0]["created_at"])
+
+    # 3. GET /api/tasks/{task_id}
+    get_res = client.get(f"/api/tasks/{task_id}", headers=headers)
+    assert get_res.status_code == 200
+    get_data = get_res.json()
+    assert _assert_explicit_utc_iso(get_data["deadline_at"]) == datetime(
+        2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc
+    )
+    _assert_explicit_utc_iso(get_data["created_at"])
+
+    # 4. PATCH /api/tasks/{task_id}
+    patch_res = client.patch(
+        f"/api/tasks/{task_id}",
+        headers=headers,
+        json={"deadline_at": "2026-11-23T16:30:00+01:00"},
+    )
+    assert patch_res.status_code == 200
+    patch_data = patch_res.json()
+    assert _assert_explicit_utc_iso(patch_data["deadline_at"]) == datetime(
+        2026, 11, 23, 15, 30, 0, tzinfo=timezone.utc
+    )
+    _assert_explicit_utc_iso(patch_data["created_at"])
+
+    # 5. PATCH /api/tasks/{task_id}/toggle
+    toggle_res = client.patch(f"/api/tasks/{task_id}/toggle", headers=headers)
+    assert toggle_res.status_code == 200
+    toggle_data = toggle_res.json()
+    assert _assert_explicit_utc_iso(toggle_data["deadline_at"]) == datetime(
+        2026, 11, 23, 15, 30, 0, tzinfo=timezone.utc
+    )
+    _assert_explicit_utc_iso(toggle_data["created_at"])
+
+    # 6. User endpoints: GET /api/me, PATCH /api/settings/timezone, PATCH /api/settings/reminders
+    me_res = client.get("/api/me", headers=headers)
+    assert me_res.status_code == 200
+    _assert_explicit_utc_iso(me_res.json()["created_at"])
+
+    tz_res = client.patch(
+        "/api/settings/timezone",
+        headers=headers,
+        json={"timezone": "Europe/Berlin"},
+    )
+    assert tz_res.status_code == 200
+    _assert_explicit_utc_iso(tz_res.json()["created_at"])
+
+    rem_res = client.patch(
+        "/api/settings/reminders",
+        headers=headers,
+        json={"reminder_interval_hours": 3},
+    )
+    assert rem_res.status_code == 200
+    _assert_explicit_utc_iso(rem_res.json()["created_at"])
+
+
+@pytest.mark.asyncio
+async def test_task_lifecycle_updates_clear_custom_reminder_at(api_context) -> None:
+    """Verifies Issue #27: Toggling to done, updating status to done/canceled, or updating deadline_at clears custom_reminder_at."""
+    client, session_factory, settings = api_context
+    user_id = 10028
+    headers = get_auth_headers(user_id, settings.BOT_TOKEN)
+    remind_at = datetime(2026, 11, 23, 15, 30, 0, tzinfo=timezone.utc)
+
+    async with session_factory() as session:
+        await get_or_create_user(session, telegram_id=user_id)
+        t_toggle = Task(
+            user_id=user_id,
+            title="Toggle task",
+            target_date=date(2026, 11, 23),
+            status=TaskStatus.todo,
+            custom_reminder_at=remind_at,
+        )
+        t_cancel = Task(
+            user_id=user_id,
+            title="Cancel task",
+            target_date=date(2026, 11, 23),
+            status=TaskStatus.todo,
+            custom_reminder_at=remind_at,
+        )
+        t_reschedule = Task(
+            user_id=user_id,
+            title="Reschedule task",
+            target_date=date(2026, 11, 23),
+            deadline_at=datetime(2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc),
+            status=TaskStatus.todo,
+            custom_reminder_at=remind_at,
+        )
+        session.add_all([t_toggle, t_cancel, t_reschedule])
+        await session.commit()
+        for t in (t_toggle, t_cancel, t_reschedule):
+            await session.refresh(t)
+        id_toggle, id_cancel, id_reschedule = t_toggle.id, t_cancel.id, t_reschedule.id
+
+    # 1. Toggle todo -> done clears custom_reminder_at
+    r1 = client.patch(f"/api/tasks/{id_toggle}/toggle", headers=headers)
+    assert r1.status_code == 200
+    assert r1.json()["status"] == "done"
+
+    # 2. PATCH status -> canceled clears custom_reminder_at
+    r2 = client.patch(f"/api/tasks/{id_cancel}", headers=headers, json={"status": "canceled"})
+    assert r2.status_code == 200
+    assert r2.json()["status"] == "canceled"
+
+    # 3. PATCH deadline_at clears custom_reminder_at
+    r3 = client.patch(
+        f"/api/tasks/{id_reschedule}",
+        headers=headers,
+        json={"deadline_at": "2026-11-23T18:00:00Z"},
+    )
+    assert r3.status_code == 200
+
+    async with session_factory() as session:
+        for tid in (id_toggle, id_cancel, id_reschedule):
+            db_task = await session.get(Task, tid)
+            assert db_task is not None
+            assert db_task.custom_reminder_at is None

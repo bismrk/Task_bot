@@ -61,31 +61,45 @@ def create_mock_message() -> AsyncMock:
 
 
 def test_get_deadline_keyboard_structure() -> None:
-    """Verifies REQ-SCH-03: get_deadline_keyboard returns max 2 buttons per row with valid callbacks."""
+    """Verifies REQ-SCH-03 & Issue #27: get_deadline_keyboard returns 2 rows (max 2 buttons/row) with done, snooze, and remind callbacks."""
     task_id = 42
     user_id = 999
     kb = get_deadline_keyboard(task_id=task_id, user_id=user_id, snooze_minutes=15)
 
     assert isinstance(kb, InlineKeyboardMarkup)
-    assert len(kb.inline_keyboard) == 1
-    row = kb.inline_keyboard[0]
-    assert len(row) <= 2
-    assert len(row) == 2
+    assert len(kb.inline_keyboard) == 2
 
-    done_btn = row[0]
+    row1 = kb.inline_keyboard[0]
+    assert len(row1) == 2
+    assert len(row1) <= 2
+
+    done_btn = row1[0]
     assert done_btn.text == "✅ Виконано"
     done_data = DeadlineCallback.unpack(done_btn.callback_data)
     assert done_data.action == "done"
     assert done_data.task_id == task_id
     assert done_data.user_id == user_id
+    assert done_data.minutes == 15
 
-    snooze_btn = row[1]
+    snooze_btn = row1[1]
     assert snooze_btn.text == "⏰ +15 хв"
     snooze_data = DeadlineCallback.unpack(snooze_btn.callback_data)
     assert snooze_data.action == "snooze"
     assert snooze_data.task_id == task_id
     assert snooze_data.user_id == user_id
     assert snooze_data.minutes == 15
+
+    row2 = kb.inline_keyboard[1]
+    assert len(row2) == 1
+    assert len(row2) <= 2
+
+    remind_btn = row2[0]
+    assert remind_btn.text == "🔔 Нагадати через 15 хв"
+    remind_data = DeadlineCallback.unpack(remind_btn.callback_data)
+    assert remind_data.action == "remind"
+    assert remind_data.task_id == task_id
+    assert remind_data.user_id == user_id
+    assert remind_data.minutes == 15
 
 
 # ==============================================================================
@@ -867,7 +881,12 @@ async def test_24_7_early_morning_multi_task_independent_reminders(
         sessionmaker=session_factory,
         now_dt=datetime(2026, 11, 21, 1, 59, 0, tzinfo=timezone.utc),
     )
-    assert stats_0359 == {"reminders_1h_sent": 0, "reminders_10m_sent": 0, "errors": 0}
+    assert stats_0359 == {
+        "reminders_1h_sent": 0,
+        "reminders_10m_sent": 0,
+        "custom_reminders_sent": 0,
+        "errors": 0,
+    }
     mock_bot.send_message.assert_not_called()
 
     # 2. At 04:00 local (02:00 UTC): Task A triggers -1h (🕒 до 05:00); Task B does not trigger
@@ -876,7 +895,12 @@ async def test_24_7_early_morning_multi_task_independent_reminders(
         sessionmaker=session_factory,
         now_dt=datetime(2026, 11, 21, 2, 0, 0, tzinfo=timezone.utc),
     )
-    assert stats_0400 == {"reminders_1h_sent": 1, "reminders_10m_sent": 0, "errors": 0}
+    assert stats_0400 == {
+        "reminders_1h_sent": 1,
+        "reminders_10m_sent": 0,
+        "custom_reminders_sent": 0,
+        "errors": 0,
+    }
     mock_bot.send_message.assert_called_once()
     msg_a_1h = mock_bot.send_message.call_args.kwargs["text"]
     assert "⏳" in msg_a_1h
@@ -900,7 +924,12 @@ async def test_24_7_early_morning_multi_task_independent_reminders(
         sessionmaker=session_factory,
         now_dt=datetime(2026, 11, 21, 2, 50, 0, tzinfo=timezone.utc),
     )
-    assert stats_0450 == {"reminders_1h_sent": 0, "reminders_10m_sent": 1, "errors": 0}
+    assert stats_0450 == {
+        "reminders_1h_sent": 0,
+        "reminders_10m_sent": 1,
+        "custom_reminders_sent": 0,
+        "errors": 0,
+    }
     mock_bot.send_message.assert_called_once()
     msg_a_10m = mock_bot.send_message.call_args.kwargs["text"]
     assert "🚨" in msg_a_10m
@@ -921,7 +950,12 @@ async def test_24_7_early_morning_multi_task_independent_reminders(
         sessionmaker=session_factory,
         now_dt=datetime(2026, 11, 21, 5, 0, 0, tzinfo=timezone.utc),
     )
-    assert stats_0700 == {"reminders_1h_sent": 1, "reminders_10m_sent": 0, "errors": 0}
+    assert stats_0700 == {
+        "reminders_1h_sent": 1,
+        "reminders_10m_sent": 0,
+        "custom_reminders_sent": 0,
+        "errors": 0,
+    }
     mock_bot.send_message.assert_called_once()
     msg_b_1h = mock_bot.send_message.call_args.kwargs["text"]
     assert "⏳" in msg_b_1h
@@ -939,7 +973,12 @@ async def test_24_7_early_morning_multi_task_independent_reminders(
         sessionmaker=session_factory,
         now_dt=datetime(2026, 11, 21, 5, 50, 0, tzinfo=timezone.utc),
     )
-    assert stats_0750 == {"reminders_1h_sent": 0, "reminders_10m_sent": 1, "errors": 0}
+    assert stats_0750 == {
+        "reminders_1h_sent": 0,
+        "reminders_10m_sent": 1,
+        "custom_reminders_sent": 0,
+        "errors": 0,
+    }
     mock_bot.send_message.assert_called_once()
     msg_b_10m = mock_bot.send_message.call_args.kwargs["text"]
     assert "🚨" in msg_b_10m
@@ -986,9 +1025,620 @@ async def test_deadline_check_invalid_user_timezone_falls_back_to_kyiv(
         now_dt=datetime(2026, 11, 21, 2, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert stats == {"reminders_1h_sent": 1, "reminders_10m_sent": 0, "errors": 0}
+    assert stats == {
+        "reminders_1h_sent": 1,
+        "reminders_10m_sent": 0,
+        "custom_reminders_sent": 0,
+        "errors": 0,
+    }
     mock_bot.send_message.assert_called_once()
     assert "🕒 до 05:00" in mock_bot.send_message.call_args.kwargs["text"]
+
+
+# ==============================================================================
+# Custom Repeat Reminder Callback & Scheduler Tests (Issue #27)
+# ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_done_callback_clears_custom_reminder_at(db_session: AsyncSession) -> None:
+    """Verifies Issue #27: action='done' marks task done and clears custom_reminder_at."""
+    user = User(telegram_id=701, timezone="Europe/Berlin")
+    db_session.add(user)
+    await db_session.commit()
+
+    task = Task(
+        user_id=user.telegram_id,
+        title="Закрити задачу",
+        target_date=date(2026, 11, 23),
+        deadline_at=datetime(2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc),
+        custom_reminder_at=datetime(2026, 11, 23, 15, 30, 0, tzinfo=timezone.utc),
+        status=TaskStatus.todo,
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    mock_msg = create_mock_message()
+    query = AsyncMock(spec=CallbackQuery)
+    query.from_user = TgUser(id=user.telegram_id, is_bot=False, first_name="Test")
+    query.message = mock_msg
+    query.answer = AsyncMock()
+
+    await deadline_callback_handler(
+        callback_query=query,
+        callback_data=DeadlineCallback(action="done", task_id=task.id, user_id=user.telegram_id),
+        session=db_session,
+    )
+
+    await db_session.refresh(task)
+    assert task.status == TaskStatus.done
+    assert task.custom_reminder_at is None
+    query.answer.assert_called_once_with("✅ Виконано!")
+
+
+@pytest.mark.asyncio
+async def test_remind_callback_sets_custom_reminder_without_modifying_deadline(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #27: action='remind' schedules custom_reminder_at in +15m without altering deadline_at, target_date, or flags."""
+    user = User(telegram_id=702, timezone="Europe/Berlin")
+    db_session.add(user)
+    await db_session.commit()
+
+    # 15:15 UTC == 16:15 Europe/Berlin (winter UTC+1)
+    original_deadline = datetime(2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc)
+    original_date = date(2026, 11, 23)
+    task = Task(
+        user_id=user.telegram_id,
+        title="Привітати Таню <important>",
+        target_date=original_date,
+        deadline_at=original_deadline,
+        status=TaskStatus.todo,
+        reminder_sent_1h=True,
+        reminder_sent_10m=False,
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    mock_msg = create_mock_message()
+    query = AsyncMock(spec=CallbackQuery)
+    query.from_user = TgUser(id=user.telegram_id, is_bot=False, first_name="Test")
+    query.message = mock_msg
+    query.answer = AsyncMock()
+
+    before = datetime.now(timezone.utc)
+    await deadline_callback_handler(
+        callback_query=query,
+        callback_data=DeadlineCallback(
+            action="remind", task_id=task.id, user_id=user.telegram_id, minutes=15
+        ),
+        session=db_session,
+    )
+    after = datetime.now(timezone.utc)
+
+    await db_session.refresh(task)
+    assert task.custom_reminder_at is not None
+    stored_remind = (
+        task.custom_reminder_at.replace(tzinfo=timezone.utc)
+        if task.custom_reminder_at.tzinfo is None
+        else task.custom_reminder_at.astimezone(timezone.utc)
+    )
+    assert before + timedelta(minutes=15) - timedelta(seconds=2) <= stored_remind <= after + timedelta(minutes=15) + timedelta(seconds=2)
+
+    # Deadline, target_date, and -1h/-10m flags must remain strictly unchanged
+    stored_deadline = (
+        task.deadline_at.replace(tzinfo=timezone.utc)
+        if task.deadline_at.tzinfo is None
+        else task.deadline_at.astimezone(timezone.utc)
+    )
+    assert stored_deadline == original_deadline
+    assert task.target_date == original_date
+    assert task.reminder_sent_1h is True
+    assert task.reminder_sent_10m is False
+
+    # Message edit check: HTML-escaped title, local reminder time, unchanged 🕒 до 16:15, 2-row keyboard
+    mock_msg.edit_text.assert_called_once()
+    edit_kwargs = mock_msg.edit_text.call_args.kwargs
+    assert edit_kwargs["parse_mode"] == "HTML"
+    assert "Привітати Таню &lt;important&gt;" in edit_kwargs["text"]
+    assert "🕒 до 16:15" in edit_kwargs["text"]
+    expected_remind_hhmm = stored_remind.astimezone(ZoneInfo("Europe/Berlin")).strftime("%H:%M")
+    assert expected_remind_hhmm in edit_kwargs["text"]
+    kb = edit_kwargs["reply_markup"]
+    assert isinstance(kb, InlineKeyboardMarkup)
+    assert len(kb.inline_keyboard) == 2
+
+    query.answer.assert_called_once_with("🔔 Нагадаю через 15 хв")
+
+
+@pytest.mark.asyncio
+async def test_remind_callback_no_deadline_and_invalid_timezone_fallback(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #27: action='remind' works when deadline_at is None and safely falls back to Europe/Kyiv on invalid tz."""
+    user = User(telegram_id=703, timezone="Invalid/Zone")
+    db_session.add(user)
+    await db_session.commit()
+
+    task = Task(
+        user_id=user.telegram_id,
+        title="Задача без часу",
+        target_date=date(2026, 11, 23),
+        deadline_at=None,
+        status=TaskStatus.todo,
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    mock_msg = create_mock_message()
+    query = AsyncMock(spec=CallbackQuery)
+    query.from_user = TgUser(id=user.telegram_id, is_bot=False, first_name="Test")
+    query.message = mock_msg
+    query.answer = AsyncMock()
+
+    await deadline_callback_handler(
+        callback_query=query,
+        callback_data=DeadlineCallback(
+            action="remind", task_id=task.id, user_id=user.telegram_id, minutes=15
+        ),
+        session=db_session,
+    )
+
+    await db_session.refresh(task)
+    assert task.deadline_at is None
+    assert task.custom_reminder_at is not None
+
+    edit_kwargs = mock_msg.edit_text.call_args.kwargs
+    assert "Задача без часу" in edit_kwargs["text"]
+    assert "🕒 до" not in edit_kwargs["text"]
+    query.answer.assert_called_once_with("🔔 Нагадаю через 15 хв")
+
+
+@pytest.mark.asyncio
+async def test_remind_callback_repeated_click_overwrites_and_handles_edit_error(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #27: Repeated clicks overwrite custom_reminder_at without changing deadline or raising edit errors."""
+    user = User(telegram_id=704, timezone="Europe/Kyiv")
+    db_session.add(user)
+    await db_session.commit()
+
+    original_deadline = datetime(2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc)
+    old_remind = datetime(2026, 11, 23, 14, 0, 0, tzinfo=timezone.utc)
+    task = Task(
+        user_id=user.telegram_id,
+        title="Повторний клік",
+        target_date=date(2026, 11, 23),
+        deadline_at=original_deadline,
+        custom_reminder_at=old_remind,
+        status=TaskStatus.todo,
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    mock_msg = create_mock_message()
+    mock_msg.edit_text.side_effect = RuntimeError("Bad Request: message is not modified")
+    query = AsyncMock(spec=CallbackQuery)
+    query.from_user = TgUser(id=user.telegram_id, is_bot=False, first_name="Test")
+    query.message = mock_msg
+    query.answer = AsyncMock()
+
+    await deadline_callback_handler(
+        callback_query=query,
+        callback_data=DeadlineCallback(
+            action="remind", task_id=task.id, user_id=user.telegram_id, minutes=15
+        ),
+        session=db_session,
+    )
+
+    await db_session.refresh(task)
+    assert task.custom_reminder_at is not None
+    stored_remind = (
+        task.custom_reminder_at.replace(tzinfo=timezone.utc)
+        if task.custom_reminder_at.tzinfo is None
+        else task.custom_reminder_at.astimezone(timezone.utc)
+    )
+    assert stored_remind != old_remind
+    stored_deadline = (
+        task.deadline_at.replace(tzinfo=timezone.utc)
+        if task.deadline_at.tzinfo is None
+        else task.deadline_at.astimezone(timezone.utc)
+    )
+    assert stored_deadline == original_deadline
+    query.answer.assert_called_once_with("🔔 Нагадаю через 15 хв")
+
+
+@pytest.mark.asyncio
+async def test_remind_callback_guards_tenant_missing_and_already_done(
+    db_session: AsyncSession,
+) -> None:
+    """Verifies Issue #27: action='remind' enforces tenant security, missing-task, and already-done guards."""
+    owner_id = 705
+    attacker_id = 799
+    user = User(telegram_id=owner_id, timezone="Europe/Kyiv")
+    db_session.add(user)
+    await db_session.commit()
+
+    todo_task = Task(
+        user_id=owner_id,
+        title="Власне завдання",
+        target_date=date(2026, 11, 23),
+        status=TaskStatus.todo,
+    )
+    done_task = Task(
+        user_id=owner_id,
+        title="Готове завдання",
+        target_date=date(2026, 11, 23),
+        status=TaskStatus.done,
+    )
+    db_session.add_all([todo_task, done_task])
+    await db_session.commit()
+
+    # 1. Tenant mismatch
+    msg1 = create_mock_message()
+    q1 = AsyncMock(spec=CallbackQuery)
+    q1.from_user = TgUser(id=attacker_id, is_bot=False, first_name="Attacker")
+    q1.message = msg1
+    q1.answer = AsyncMock()
+    await deadline_callback_handler(
+        callback_query=q1,
+        callback_data=DeadlineCallback(action="remind", task_id=todo_task.id, user_id=owner_id),
+        session=db_session,
+    )
+    q1.answer.assert_called_once_with(
+        "⚠️ Ви не можете керувати завданнями іншого користувача.",
+        show_alert=True,
+    )
+    await db_session.refresh(todo_task)
+    assert todo_task.custom_reminder_at is None
+
+    # 2. Missing task
+    msg2 = create_mock_message()
+    q2 = AsyncMock(spec=CallbackQuery)
+    q2.from_user = TgUser(id=owner_id, is_bot=False, first_name="Owner")
+    q2.message = msg2
+    q2.answer = AsyncMock()
+    await deadline_callback_handler(
+        callback_query=q2,
+        callback_data=DeadlineCallback(action="remind", task_id=999999, user_id=owner_id),
+        session=db_session,
+    )
+    q2.answer.assert_called_once_with("⚠️ Завдання не знайдено або вже видалено.", show_alert=True)
+    msg2.edit_reply_markup.assert_called_once_with(reply_markup=None)
+
+    # 3. Already done task
+    msg3 = create_mock_message()
+    q3 = AsyncMock(spec=CallbackQuery)
+    q3.from_user = TgUser(id=owner_id, is_bot=False, first_name="Owner")
+    q3.message = msg3
+    q3.answer = AsyncMock()
+    await deadline_callback_handler(
+        callback_query=q3,
+        callback_data=DeadlineCallback(action="remind", task_id=done_task.id, user_id=owner_id),
+        session=db_session,
+    )
+    q3.answer.assert_called_once_with("⚠️ Завдання вже виконано.", show_alert=True)
+    msg3.edit_reply_markup.assert_called_once_with(reply_markup=None)
+    await db_session.refresh(done_task)
+    assert done_task.custom_reminder_at is None
+
+
+@pytest.mark.asyncio
+async def test_custom_reminder_due_fires_once_and_clears_field(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #27: Due custom_reminder_at dispatches repeat reminder once, clears field, and is idempotent."""
+    user = User(telegram_id=710, timezone="Europe/Berlin")
+    db_session.add(user)
+    await db_session.commit()
+
+    now_utc = datetime(2026, 11, 23, 15, 0, 0, tzinfo=timezone.utc)
+    # Deadline at 15:15 UTC (16:15 Berlin); -1h already sent, -10m not yet in window
+    task = Task(
+        user_id=user.telegram_id,
+        title="Привітати Таню <3",
+        target_date=now_utc.date(),
+        deadline_at=datetime(2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc),
+        priority=TaskPriority.high,
+        tag="#сім'я<tag>",
+        status=TaskStatus.todo,
+        reminder_sent_1h=True,
+        reminder_sent_10m=False,
+        custom_reminder_at=now_utc,
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    stats = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=now_utc,
+    )
+    assert stats == {
+        "reminders_1h_sent": 0,
+        "reminders_10m_sent": 0,
+        "custom_reminders_sent": 1,
+        "errors": 0,
+    }
+
+    mock_bot.send_message.assert_called_once()
+    call_kwargs = mock_bot.send_message.call_args.kwargs
+    assert call_kwargs["chat_id"] == user.telegram_id
+    assert call_kwargs["parse_mode"] == "HTML"
+    assert "🔔 <b>Повторне нагадування!</b>" in call_kwargs["text"]
+    assert "Привітати Таню &lt;3" in call_kwargs["text"]
+    assert "⚠️ Високий" in call_kwargs["text"]
+    assert "🏷️ #сім&#x27;я&lt;tag&gt;" in call_kwargs["text"]
+    assert "🕒 до 16:15" in call_kwargs["text"]
+    kb = call_kwargs["reply_markup"]
+    assert isinstance(kb, InlineKeyboardMarkup)
+    assert len(kb.inline_keyboard) == 2
+
+    await db_session.refresh(task)
+    assert task.custom_reminder_at is None
+
+    # Second tick must not re-fire
+    mock_bot.send_message.reset_mock()
+    stats2 = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=now_utc + timedelta(minutes=1),
+    )
+    assert stats2["custom_reminders_sent"] == 0
+    mock_bot.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_custom_reminder_future_does_not_fire_early(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #27: Future custom_reminder_at > now_utc does not fire and stays unchanged."""
+    user = User(telegram_id=711, timezone="Europe/Kyiv")
+    db_session.add(user)
+    await db_session.commit()
+
+    now_utc = datetime(2026, 11, 23, 15, 0, 0, tzinfo=timezone.utc)
+    future_remind = now_utc + timedelta(minutes=10)
+    task = Task(
+        user_id=user.telegram_id,
+        title="Ще рано",
+        target_date=now_utc.date(),
+        deadline_at=now_utc + timedelta(hours=3),
+        status=TaskStatus.todo,
+        custom_reminder_at=future_remind,
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    stats = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=now_utc,
+    )
+    assert stats == {
+        "reminders_1h_sent": 0,
+        "reminders_10m_sent": 0,
+        "custom_reminders_sent": 0,
+        "errors": 0,
+    }
+    mock_bot.send_message.assert_not_called()
+
+    await db_session.refresh(task)
+    assert task.custom_reminder_at is not None
+
+
+@pytest.mark.asyncio
+async def test_custom_reminder_fires_when_deadline_past_and_for_untimed_tasks(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #27: Due custom reminder fires for past-deadline todo tasks and untimed todo tasks."""
+    user = User(telegram_id=712, timezone="Europe/Kyiv")
+    db_session.add(user)
+    await db_session.commit()
+
+    now_utc = datetime(2026, 11, 23, 15, 25, 0, tzinfo=timezone.utc)
+    # Past deadline (15:15 UTC == 17:15 Kyiv), custom reminder due at 15:20 UTC
+    past_deadline_task = Task(
+        user_id=user.telegram_id,
+        title="Після дедлайну",
+        target_date=now_utc.date(),
+        deadline_at=datetime(2026, 11, 23, 15, 15, 0, tzinfo=timezone.utc),
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        reminder_sent_1h=True,
+        reminder_sent_10m=True,
+        custom_reminder_at=datetime(2026, 11, 23, 15, 20, 0, tzinfo=timezone.utc),
+    )
+    # Untimed task (deadline_at=None), custom reminder due at 15:25 UTC
+    untimed_task = Task(
+        user_id=user.telegram_id,
+        title="Без дедлайну",
+        target_date=now_utc.date(),
+        deadline_at=None,
+        priority=TaskPriority.low,
+        status=TaskStatus.todo,
+        custom_reminder_at=now_utc,
+    )
+    db_session.add_all([past_deadline_task, untimed_task])
+    await db_session.commit()
+
+    stats = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=now_utc,
+    )
+    assert stats == {
+        "reminders_1h_sent": 0,
+        "reminders_10m_sent": 0,
+        "custom_reminders_sent": 2,
+        "errors": 0,
+    }
+    assert mock_bot.send_message.call_count == 2
+
+    texts = [call.kwargs["text"] for call in mock_bot.send_message.call_args_list]
+    past_text = next(t for t in texts if "Після дедлайну" in t)
+    untimed_text = next(t for t in texts if "Без дедлайну" in t)
+    assert "🔔 <b>Повторне нагадування!</b>" in past_text
+    assert "🕒 до 17:15" in past_text
+    assert "🔔 <b>Повторне нагадування!</b>" in untimed_text
+    assert "💤 Низький" in untimed_text
+    assert "🕒 до" not in untimed_text
+
+    await db_session.refresh(past_deadline_task)
+    await db_session.refresh(untimed_task)
+    assert past_deadline_task.custom_reminder_at is None
+    assert untimed_task.custom_reminder_at is None
+
+
+@pytest.mark.asyncio
+async def test_custom_reminder_ignored_for_done_and_canceled_tasks(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #27: done and canceled tasks with due custom_reminder_at never trigger."""
+    user = User(telegram_id=713, timezone="Europe/Kyiv")
+    db_session.add(user)
+    await db_session.commit()
+
+    now_utc = datetime(2026, 11, 23, 15, 30, 0, tzinfo=timezone.utc)
+    done_task = Task(
+        user_id=user.telegram_id,
+        title="Виконане",
+        target_date=now_utc.date(),
+        status=TaskStatus.done,
+        custom_reminder_at=now_utc - timedelta(minutes=1),
+    )
+    canceled_task = Task(
+        user_id=user.telegram_id,
+        title="Скасоване",
+        target_date=now_utc.date(),
+        status=TaskStatus.canceled,
+        custom_reminder_at=now_utc - timedelta(minutes=1),
+    )
+    db_session.add_all([done_task, canceled_task])
+    await db_session.commit()
+
+    stats = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=now_utc,
+    )
+    assert stats["custom_reminders_sent"] == 0
+    assert stats["errors"] == 0
+    mock_bot.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_custom_reminder_blocked_bot_clears_field_without_error(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #27: Blocked-bot errors clear custom_reminder_at and do not increment errors."""
+    user1 = User(telegram_id=714, timezone="Europe/Kyiv")
+    user2 = User(telegram_id=715, timezone="Europe/Kyiv")
+    db_session.add_all([user1, user2])
+    await db_session.commit()
+
+    now_utc = datetime(2026, 11, 23, 15, 30, 0, tzinfo=timezone.utc)
+    t1 = Task(
+        user_id=user1.telegram_id,
+        title="Forbidden user task",
+        target_date=now_utc.date(),
+        status=TaskStatus.todo,
+        custom_reminder_at=now_utc,
+    )
+    t2 = Task(
+        user_id=user2.telegram_id,
+        title="Blocked API user task",
+        target_date=now_utc.date(),
+        status=TaskStatus.todo,
+        custom_reminder_at=now_utc,
+    )
+    db_session.add_all([t1, t2])
+    await db_session.commit()
+
+    async def fake_send(chat_id, **kwargs):
+        if chat_id == user1.telegram_id:
+            raise TelegramForbiddenError(method="sendMessage", message="Forbidden: bot was blocked by the user")
+        raise TelegramAPIError(method="sendMessage", message="User is deactivated")
+
+    mock_bot.send_message.side_effect = fake_send
+
+    stats = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=now_utc,
+    )
+    assert stats["custom_reminders_sent"] == 0
+    assert stats["errors"] == 0
+
+    await db_session.refresh(t1)
+    await db_session.refresh(t2)
+    assert t1.custom_reminder_at is None
+    assert t1.reminder_sent_1h is True
+    assert t1.reminder_sent_10m is True
+    assert t2.custom_reminder_at is None
+    assert t2.reminder_sent_1h is True
+    assert t2.reminder_sent_10m is True
+
+
+@pytest.mark.asyncio
+async def test_custom_reminder_transient_error_rolls_back_and_isolates(
+    db_session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    mock_bot: AsyncMock,
+) -> None:
+    """Verifies Issue #27: Unexpected error preserves custom_reminder_at for retry, increments errors, and isolates."""
+    user1 = User(telegram_id=716, timezone="Europe/Kyiv")
+    user2 = User(telegram_id=717, timezone="Europe/Kyiv")
+    db_session.add_all([user1, user2])
+    await db_session.commit()
+
+    now_utc = datetime(2026, 11, 23, 15, 30, 0, tzinfo=timezone.utc)
+    t1 = Task(
+        user_id=user1.telegram_id,
+        title="Failing custom reminder",
+        target_date=now_utc.date(),
+        status=TaskStatus.todo,
+        custom_reminder_at=now_utc,
+    )
+    t2 = Task(
+        user_id=user2.telegram_id,
+        title="Succeeding custom reminder",
+        target_date=now_utc.date(),
+        status=TaskStatus.todo,
+        custom_reminder_at=now_utc,
+    )
+    db_session.add_all([t1, t2])
+    await db_session.commit()
+
+    async def fake_send(chat_id, **kwargs):
+        if chat_id == user1.telegram_id:
+            raise RuntimeError("Temporary network failure")
+        return AsyncMock(message_id=300)
+
+    mock_bot.send_message.side_effect = fake_send
+
+    stats = await run_deadline_checks(
+        bot=mock_bot,
+        sessionmaker=session_factory,
+        now_dt=now_utc,
+    )
+    assert stats["custom_reminders_sent"] == 1
+    assert stats["errors"] == 1
+
+    await db_session.refresh(t1)
+    await db_session.refresh(t2)
+    assert t1.custom_reminder_at is not None
+    assert t2.custom_reminder_at is None
 
 
 # ==============================================================================

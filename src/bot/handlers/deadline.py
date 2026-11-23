@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 import html
 import logging
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Router
 from aiogram.types import CallbackQuery, Message
@@ -18,6 +18,21 @@ logger = logging.getLogger(__name__)
 
 router = Router(name="deadline")
 deadline_router = router
+
+
+def _resolve_user_timezone(tz_name: str | None) -> ZoneInfo:
+    """Resolve an IANA timezone name with safe fallback to Europe/Kyiv."""
+    if tz_name:
+        cleaned = tz_name.strip()
+        if cleaned:
+            try:
+                return ZoneInfo(cleaned)
+            except (ZoneInfoNotFoundError, KeyError, ValueError):
+                logger.warning(
+                    "Invalid timezone %r encountered in deadline handler; falling back to Europe/Kyiv",
+                    tz_name,
+                )
+    return ZoneInfo("Europe/Kyiv")
 
 
 @router.callback_query(DeadlineCallback.filter())
@@ -90,6 +105,7 @@ async def deadline_callback_handler(
 
     if callback_data.action == "done":
         task.status = TaskStatus.done
+        task.custom_reminder_at = None
         await session.commit()
 
         if callback_query.message and isinstance(callback_query.message, Message):
@@ -121,7 +137,7 @@ async def deadline_callback_handler(
         task.deadline_at = new_deadline
 
         user = await session.get(User, task.user_id)
-        user_tz = ZoneInfo(user.timezone) if user and user.timezone else ZoneInfo("Europe/Kyiv")
+        user_tz = _resolve_user_timezone(user.timezone if user else None)
         deadline_local = new_deadline.astimezone(user_tz)
 
         if deadline_local.date() > task.target_date:
@@ -160,6 +176,56 @@ async def deadline_callback_handler(
                 pass
 
         await callback_query.answer(f"⏰ Відкладено на {snooze_mins} хв")
+        return
+
+    if callback_data.action == "remind":
+        now_utc = datetime.now(timezone.utc)
+        remind_mins = callback_data.minutes if callback_data.minutes > 0 else 15
+        remind_at_utc = now_utc + timedelta(minutes=remind_mins)
+        task.custom_reminder_at = remind_at_utc
+
+        await session.commit()
+
+        user = await session.get(User, task.user_id)
+        user_tz = _resolve_user_timezone(user.timezone if user else None)
+        remind_time_str = remind_at_utc.astimezone(user_tz).strftime("%H:%M")
+
+        escaped_title = html.escape(task.title)
+        if task.deadline_at is not None:
+            deadline_dt = task.deadline_at
+            if deadline_dt.tzinfo is None:
+                deadline_utc = deadline_dt.replace(tzinfo=timezone.utc)
+            else:
+                deadline_utc = deadline_dt.astimezone(timezone.utc)
+            deadline_time_str = deadline_utc.astimezone(user_tz).strftime("%H:%M")
+            detail_line = (
+                f"• <b>{escaped_title}</b> — 🕒 до {deadline_time_str} "
+                f"(нагадування о {remind_time_str})"
+            )
+        else:
+            detail_line = f"• <b>{escaped_title}</b> — нагадування о {remind_time_str}"
+
+        new_text = (
+            f"🔔 <b>Нагадаю через {remind_mins} хв (о {remind_time_str})!</b>\n\n"
+            f"{detail_line}"
+        )
+        new_kb = get_deadline_keyboard(
+            task_id=task.id,
+            user_id=task.user_id,
+            snooze_minutes=remind_mins,
+        )
+
+        if callback_query.message and isinstance(callback_query.message, Message):
+            try:
+                await callback_query.message.edit_text(
+                    text=new_text,
+                    reply_markup=new_kb,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+        await callback_query.answer(f"🔔 Нагадаю через {remind_mins} хв")
         return
 
     await callback_query.answer()

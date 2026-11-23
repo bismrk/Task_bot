@@ -21,8 +21,11 @@ def get_deadline_keyboard(
     """Generate inline keyboard for deadline reminder notification.
 
     Buttons:
-    - [✅ Виконано] (action="done", task_id=task_id, user_id=user_id, minutes=snooze_minutes)
-    - [⏰ +15 хв] (action="snooze", task_id=task_id, user_id=user_id, minutes=snooze_minutes)
+    - Row 1:
+      - [✅ Виконано] (action="done", task_id=task_id, user_id=user_id, minutes=snooze_minutes)
+      - [⏰ +15 хв] (action="snooze", task_id=task_id, user_id=user_id, minutes=snooze_minutes)
+    - Row 2:
+      - [🔔 Нагадати через 15 хв] (action="remind", task_id=task_id, user_id=user_id, minutes=snooze_minutes)
     Arranged with max 2 buttons per row per design system.
     """
     done_btn = InlineKeyboardButton(
@@ -43,4 +46,13 @@ def get_deadline_keyboard(
             minutes=snooze_minutes,
         ).pack(),
     )
-    return InlineKeyboardMarkup(inline_keyboard=[[done_btn, snooze_btn]])
+    remind_btn = InlineKeyboardButton(
+        text=f"🔔 Нагадати через {snooze_minutes} хв",
+        callback_data=DeadlineCallback(
+            action="remind",
+            task_id=task_id,
+            user_id=user_id,
+            minutes=snooze_minutes,
+        ).pack(),
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[[done_btn, snooze_btn], [remind_btn]])

@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.handlers.rollover import send_midnight_rollover_dialogue
@@ -604,12 +604,14 @@ async def run_deadline_checks(
     sessionmaker: async_sessionmaker[AsyncSession],
     now_dt: datetime | None = None,
 ) -> dict[str, int]:
-    """Monitor upcoming deadlines and dispatch -1h and -10m reminders (REQ-SCH-03).
+    """Monitor upcoming deadlines and dispatch -1h, -10m, and custom repeat reminders (REQ-SCH-03).
 
     Opens an async database session using sessionmaker(), queries all tasks where
-    status == TaskStatus.todo and deadline_at is not None.
-    Computes delta_sec between deadline_at and now_dt (normalized to UTC).
-    Sends notifications with inline action buttons [✅ Виконано] and [⏰ +15 хв].
+    status == TaskStatus.todo and (deadline_at is not None or custom_reminder_at is not None).
+    Computes delta_sec between deadline_at and now_dt (normalized to UTC), and independently
+    evaluates custom_reminder_at <= now_utc.
+    Sends notifications with inline action buttons [✅ Виконано], [⏰ +15 хв], and
+    [🔔 Нагадати через 15 хв].
     Provides per-task exception isolation (REQ-NFR-02) and restart-resilient
     idempotency tracking (REQ-NFR-03).
 
@@ -619,56 +621,148 @@ async def run_deadline_checks(
         now_dt: Optional reference datetime for simulation/testing (defaults to UTC now).
 
     Returns:
-        dict[str, int]: {"reminders_1h_sent": count1h, "reminders_10m_sent": count10m, "errors": err_count}
+        dict[str, int]: {
+            "reminders_1h_sent": int,
+            "reminders_10m_sent": int,
+            "custom_reminders_sent": int,
+            "errors": int,
+        }
     """
     stats = {
         "reminders_1h_sent": 0,
         "reminders_10m_sent": 0,
+        "custom_reminders_sent": 0,
         "errors": 0,
     }
 
-    if now_dt is None:
-        now_utc = datetime.now(timezone.utc)
-    elif now_dt.tzinfo is None:
-        now_utc = now_dt.replace(tzinfo=timezone.utc)
-    else:
-        now_utc = now_dt.astimezone(timezone.utc)
+    now_utc = _normalize_utc(now_dt)
 
     async with sessionmaker() as session:
         stmt = select(Task.id).where(
             Task.status == TaskStatus.todo,
-            Task.deadline_at.isnot(None),
+            or_(
+                Task.deadline_at.isnot(None),
+                Task.custom_reminder_at.isnot(None),
+            ),
         )
         result = await session.execute(stmt)
         task_ids = list(result.scalars().all())
 
         for task_id in task_ids:
             task = await session.get(Task, task_id)
-            if task is None or task.status != TaskStatus.todo or task.deadline_at is None:
+            if (
+                task is None
+                or task.status != TaskStatus.todo
+                or (task.deadline_at is None and task.custom_reminder_at is None)
+            ):
                 continue
 
             try:
-                deadline_dt = task.deadline_at
-                if deadline_dt.tzinfo is None:
-                    deadline_utc = deadline_dt.replace(tzinfo=timezone.utc)
-                else:
-                    deadline_utc = deadline_dt.astimezone(timezone.utc)
+                if task.deadline_at is not None:
+                    deadline_utc = _normalize_utc(task.deadline_at)
+                    delta_sec = (deadline_utc - now_utc).total_seconds()
 
-                delta_sec = (deadline_utc - now_utc).total_seconds()
+                    # 10-minute proximity check (-10m)
+                    if 0 < delta_sec <= 600:
+                        if not task.reminder_sent_10m:
+                            user = await session.get(User, task.user_id)
+                            user_tz = _resolve_user_timezone(user.timezone if user else None)
+                            deadline_local = deadline_utc.astimezone(user_tz)
+                            time_str = deadline_local.strftime("%H:%M")
 
-                # Past deadline: ignore
-                if delta_sec <= 0:
-                    continue
+                            meta_parts: list[str] = []
+                            if task.priority == TaskPriority.high:
+                                meta_parts.append("⚠️ Високий")
+                            elif task.priority == TaskPriority.low:
+                                meta_parts.append("💤 Низький")
+                            else:
+                                meta_parts.append("⚡ Середній")
 
-                # 10-minute proximity check (-10m)
-                if 0 < delta_sec <= 600:
-                    if not task.reminder_sent_10m:
+                            if task.tag:
+                                clean_tag = html.escape(task.tag.lstrip("#"))
+                                meta_parts.append(f"🏷️ #{clean_tag}")
+
+                            meta_parts.append(f"🕒 до {time_str}")
+                            meta_str = " | ".join(meta_parts)
+
+                            escaped_title = html.escape(task.title)
+                            text = (
+                                "🚨 <b>Увага! Дедлайн через 10 хвилин!</b>\n\n"
+                                "Час завершувати завдання:\n"
+                                f"• <b>{escaped_title}</b> — {meta_str}"
+                            )
+                            keyboard = get_deadline_keyboard(
+                                task_id=task.id,
+                                user_id=task.user_id,
+                                snooze_minutes=15,
+                            )
+
+                            await bot.send_message(
+                                chat_id=task.user_id,
+                                text=text,
+                                reply_markup=keyboard,
+                                parse_mode="HTML",
+                            )
+
+                            task.reminder_sent_10m = True
+                            task.reminder_sent_1h = True
+                            await session.commit()
+                            stats["reminders_10m_sent"] += 1
+
+                    # 1-hour proximity check (-1h)
+                    elif 600 < delta_sec <= 3600:
+                        if not task.reminder_sent_1h:
+                            user = await session.get(User, task.user_id)
+                            user_tz = _resolve_user_timezone(user.timezone if user else None)
+                            deadline_local = deadline_utc.astimezone(user_tz)
+                            time_str = deadline_local.strftime("%H:%M")
+
+                            meta_parts = []
+                            if task.priority == TaskPriority.high:
+                                meta_parts.append("⚠️ Високий")
+                            elif task.priority == TaskPriority.low:
+                                meta_parts.append("💤 Низький")
+                            else:
+                                meta_parts.append("⚡ Середній")
+
+                            if task.tag:
+                                clean_tag = html.escape(task.tag.lstrip("#"))
+                                meta_parts.append(f"🏷️ #{clean_tag}")
+
+                            meta_parts.append(f"🕒 до {time_str}")
+                            meta_str = " | ".join(meta_parts)
+
+                            escaped_title = html.escape(task.title)
+                            text = (
+                                "⏳ <b>Нагадування про дедлайн!</b>\n\n"
+                                "Залишилася 1 година до завершення:\n"
+                                f"• <b>{escaped_title}</b> — {meta_str}"
+                            )
+                            keyboard = get_deadline_keyboard(
+                                task_id=task.id,
+                                user_id=task.user_id,
+                                snooze_minutes=15,
+                            )
+
+                            await bot.send_message(
+                                chat_id=task.user_id,
+                                text=text,
+                                reply_markup=keyboard,
+                                parse_mode="HTML",
+                            )
+
+                            task.reminder_sent_1h = True
+                            await session.commit()
+                            stats["reminders_1h_sent"] += 1
+
+                # Custom one-shot repeat reminder check (evaluated independently of deadline_at)
+                if task.custom_reminder_at is not None:
+                    custom_reminder_utc = _normalize_utc(task.custom_reminder_at)
+                    if custom_reminder_utc <= now_utc:
                         user = await session.get(User, task.user_id)
                         user_tz = _resolve_user_timezone(user.timezone if user else None)
-                        deadline_local = deadline_utc.astimezone(user_tz)
-                        time_str = deadline_local.strftime("%H:%M")
 
-                        meta_parts: list[str] = []
+                        meta_parts = []
                         if task.priority == TaskPriority.high:
                             meta_parts.append("⚠️ Високий")
                         elif task.priority == TaskPriority.low:
@@ -677,16 +771,18 @@ async def run_deadline_checks(
                             meta_parts.append("⚡ Середній")
 
                         if task.tag:
-                            clean_tag = task.tag.lstrip("#")
+                            clean_tag = html.escape(task.tag.lstrip("#"))
                             meta_parts.append(f"🏷️ #{clean_tag}")
 
-                        meta_parts.append(f"🕒 до {time_str}")
-                        meta_str = " | ".join(meta_parts)
+                        if task.deadline_at is not None:
+                            deadline_local = _normalize_utc(task.deadline_at).astimezone(user_tz)
+                            meta_parts.append(f"🕒 до {deadline_local.strftime('%H:%M')}")
 
+                        meta_str = " | ".join(meta_parts)
                         escaped_title = html.escape(task.title)
                         text = (
-                            "🚨 <b>Увага! Дедлайн через 10 хвилин!</b>\n\n"
-                            "Час завершувати завдання:\n"
+                            "🔔 <b>Повторне нагадування!</b>\n\n"
+                            "Нагадуємо про завдання:\n"
                             f"• <b>{escaped_title}</b> — {meta_str}"
                         )
                         keyboard = get_deadline_keyboard(
@@ -702,62 +798,16 @@ async def run_deadline_checks(
                             parse_mode="HTML",
                         )
 
-                        task.reminder_sent_10m = True
-                        task.reminder_sent_1h = True
+                        task.custom_reminder_at = None
                         await session.commit()
-                        stats["reminders_10m_sent"] += 1
-
-                # 1-hour proximity check (-1h)
-                elif 600 < delta_sec <= 3600:
-                    if not task.reminder_sent_1h:
-                        user = await session.get(User, task.user_id)
-                        user_tz = _resolve_user_timezone(user.timezone if user else None)
-                        deadline_local = deadline_utc.astimezone(user_tz)
-                        time_str = deadline_local.strftime("%H:%M")
-
-                        meta_parts: list[str] = []
-                        if task.priority == TaskPriority.high:
-                            meta_parts.append("⚠️ Високий")
-                        elif task.priority == TaskPriority.low:
-                            meta_parts.append("💤 Низький")
-                        else:
-                            meta_parts.append("⚡ Середній")
-
-                        if task.tag:
-                            clean_tag = task.tag.lstrip("#")
-                            meta_parts.append(f"🏷️ #{clean_tag}")
-
-                        meta_parts.append(f"🕒 до {time_str}")
-                        meta_str = " | ".join(meta_parts)
-
-                        escaped_title = html.escape(task.title)
-                        text = (
-                            "⏳ <b>Нагадування про дедлайн!</b>\n\n"
-                            "Залишилася 1 година до завершення:\n"
-                            f"• <b>{escaped_title}</b> — {meta_str}"
-                        )
-                        keyboard = get_deadline_keyboard(
-                            task_id=task.id,
-                            user_id=task.user_id,
-                            snooze_minutes=15,
-                        )
-
-                        await bot.send_message(
-                            chat_id=task.user_id,
-                            text=text,
-                            reply_markup=keyboard,
-                            parse_mode="HTML",
-                        )
-
-                        task.reminder_sent_1h = True
-                        await session.commit()
-                        stats["reminders_1h_sent"] += 1
+                        stats["custom_reminders_sent"] += 1
 
             except TelegramForbiddenError as e:
                 logger.warning("User %s has blocked the bot: %s", task.user_id, e)
                 try:
                     task.reminder_sent_1h = True
                     task.reminder_sent_10m = True
+                    task.custom_reminder_at = None
                     await session.commit()
                 except Exception:
                     await session.rollback()
@@ -772,6 +822,7 @@ async def run_deadline_checks(
                     try:
                         task.reminder_sent_1h = True
                         task.reminder_sent_10m = True
+                        task.custom_reminder_at = None
                         await session.commit()
                     except Exception:
                         await session.rollback()

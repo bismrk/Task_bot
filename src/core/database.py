@@ -97,3 +97,13 @@ async def init_db(engine: AsyncEngine | None = None) -> None:
                     "ALTER TABLE users ADD COLUMN last_evening_summary_date DATE"
                 )
             )
+
+        tasks_result = await conn.execute(text("PRAGMA table_info(tasks)"))
+        existing_task_columns = {row[1] for row in tasks_result.fetchall()}
+
+        if "custom_reminder_at" not in existing_task_columns:
+            await conn.execute(
+                text(
+                    "ALTER TABLE tasks ADD COLUMN custom_reminder_at DATETIME"
+                )
+            )

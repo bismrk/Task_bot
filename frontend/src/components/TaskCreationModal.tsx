@@ -7,6 +7,78 @@ interface TaskCreationModalProps {
   onClose: () => void;
   onSubmit: (payload: TaskCreate) => Promise<void> | void;
   targetDate?: string;
+  userTimezone?: string;
+}
+
+function getTimeZoneOffsetMs(utcMs: number, timeZone: string): number {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  });
+  const parts = formatter.formatToParts(new Date(utcMs));
+  const values: Record<string, number> = {};
+  for (const part of parts) {
+    if (part.type !== 'literal') {
+      values[part.type] = Number(part.value);
+    }
+  }
+  const hour = values.hour === 24 ? 0 : values.hour;
+  const asUtcMs = Date.UTC(
+    values.year,
+    (values.month ?? 1) - 1,
+    values.day ?? 1,
+    hour ?? 0,
+    values.minute ?? 0,
+    values.second ?? 0
+  );
+  return asUtcMs - utcMs;
+}
+
+function zonedWallClockToUtcIso(
+  dateStr: string,
+  timeStr: string,
+  userTimezone?: string
+): string | null {
+  const dateParts = dateStr.split('-').map(Number);
+  const timeParts = timeStr.split(':').map(Number);
+  if (
+    dateParts.length !== 3 ||
+    timeParts.length < 2 ||
+    dateParts.some(isNaN) ||
+    timeParts.some(isNaN)
+  ) {
+    return null;
+  }
+
+  const [year, month, day] = dateParts;
+  const [hour, minute, second = 0] = timeParts;
+  const tz = userTimezone?.trim();
+
+  if (tz) {
+    try {
+      const targetUtcGuess = Date.UTC(year, month - 1, day, hour, minute, second);
+      const offset1 = getTimeZoneOffsetMs(targetUtcGuess, tz);
+      const candidate1 = targetUtcGuess - offset1;
+      const offset2 = getTimeZoneOffsetMs(candidate1, tz);
+      const candidate2 = targetUtcGuess - offset2;
+      const result = new Date(candidate2);
+      if (!isNaN(result.getTime())) {
+        return result.toISOString();
+      }
+    } catch {
+      // Invalid IANA timezone string: fall back safely to browser local timezone
+    }
+  }
+
+  const normalizedTime = timeParts.length === 2 ? `${timeStr}:00` : timeStr;
+  const fallback = new Date(`${dateStr}T${normalizedTime}`);
+  return isNaN(fallback.getTime()) ? null : fallback.toISOString();
 }
 
 type RecurrenceMode = 'none' | 'daily' | 'weekdays' | 'custom';
@@ -26,6 +98,7 @@ export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
   onClose,
   onSubmit,
   targetDate,
+  userTimezone,
 }) => {
   const [title, setTitle] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('medium');
@@ -93,10 +166,7 @@ export const TaskCreationModal: React.FC<TaskCreationModalProps> = ({
     try {
       let deadlineAt: string | null = null;
       if (deadlineTime.trim()) {
-        const d = new Date(`${effectiveDate}T${deadlineTime.trim()}:00`);
-        if (!isNaN(d.getTime())) {
-          deadlineAt = d.toISOString();
-        }
+        deadlineAt = zonedWallClockToUtcIso(effectiveDate, deadlineTime.trim(), userTimezone);
       }
 
       const cleanTag = tag.trim().replace(/^#+/, '').slice(0, 50);

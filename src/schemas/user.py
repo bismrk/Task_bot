@@ -1,6 +1,6 @@
 """Pydantic schemas for user data validation and serialization."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -84,3 +84,11 @@ class UserRead(UserBase):
     timezone: str
     reminder_interval_hours: int | None = 4
     created_at: datetime
+
+    @field_validator("created_at", mode="after")
+    @classmethod
+    def normalize_created_at_utc(cls, v: datetime) -> datetime:
+        """Normalize naive or non-UTC created_at to timezone-aware UTC."""
+        if v.tzinfo is None or v.tzinfo.utcoffset(v) is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc)

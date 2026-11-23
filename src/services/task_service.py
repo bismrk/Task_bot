@@ -187,6 +187,10 @@ async def update_task(
     if "deadline_at" in update_data:
         task.reminder_sent_1h = False
         task.reminder_sent_10m = False
+        task.custom_reminder_at = None
+
+    if "status" in update_data and task.status != TaskStatus.todo:
+        task.custom_reminder_at = None
 
     await session.commit()
     await session.refresh(task)
@@ -218,6 +222,8 @@ async def toggle_task_status(
         raise ValueError("Task not found or access denied")
 
     task.status = new_status
+    if new_status != TaskStatus.todo:
+        task.custom_reminder_at = None
     await session.commit()
     await session.refresh(task)
     return task
